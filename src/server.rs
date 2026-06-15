@@ -7,7 +7,9 @@ use crate::actions;
 use crate::config::Config;
 use crate::errors::{MCSError, Result as MCSResult};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use std::sync::Arc;
 use std::sync::LazyLock;
+use tokio::sync::Semaphore;
 
 static TOOLS_LIST_RESPONSE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let tools_json = include_str!("../tools.json");
@@ -18,6 +20,77 @@ static TOOLS_LIST_RESPONSE: LazyLock<Vec<u8>> = LazyLock::new(|| {
 
 const BUFFER_CAPACITY: usize = 65536;
 const NEWLINE: &[u8] = b"\n";
+
+/// Outcome of attempting to read one newline-delimited request.
+enum LineRead {
+    /// A complete line was read into the buffer.
+    Line,
+    /// Clean EOF before any bytes of a new line.
+    Eof,
+    /// The line exceeded `max_request_bytes` before a newline was seen.
+    TooLong,
+}
+
+/// Read a single newline-terminated line into `out`, but never buffer more than
+/// `max` bytes. On overflow returns `TooLong` without allocating the whole line,
+/// so a hostile client cannot exhaust memory with one giant unterminated line.
+async fn read_line_capped<R>(reader: &mut R, out: &mut String, max: usize) -> std::io::Result<LineRead>
+where
+    R: AsyncBufReadExt + Unpin,
+{
+    out.clear();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            // EOF: a trailing line without a newline is still a valid request.
+            if buf.is_empty() {
+                return Ok(LineRead::Eof);
+            }
+            *out = String::from_utf8_lossy(&buf).into_owned();
+            return Ok(LineRead::Line);
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                if buf.len() + i + 1 > max {
+                    reader.consume(i + 1);
+                    return Ok(LineRead::TooLong);
+                }
+                buf.extend_from_slice(&available[..=i]);
+                reader.consume(i + 1);
+                *out = String::from_utf8_lossy(&buf).into_owned();
+                return Ok(LineRead::Line);
+            }
+            None => {
+                let take = available.len();
+                if buf.len() + take > max {
+                    reader.consume(take);
+                    return Ok(LineRead::TooLong);
+                }
+                buf.extend_from_slice(available);
+                reader.consume(take);
+            }
+        }
+    }
+}
+
+/// Check a presented credential line against the expected token. Accepts an
+/// optional `Bearer ` prefix. Uses a length-then-byte comparison that does not
+/// early-return on the first differing byte.
+pub fn token_matches(presented: &str, expected: &str) -> bool {
+    let presented = presented.trim();
+    let presented = presented.strip_prefix("Bearer ").unwrap_or(presented).trim();
+    let a = presented.as_bytes();
+    let b = expected.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 fn parse_error(msg: String) -> JsonRpcResponse {
     let mcp_error = MCSError::ParseError(msg);
@@ -33,11 +106,15 @@ fn parse_request(line: &str) -> std::result::Result<JsonRpcRequest, String> {
 }
 
 pub struct MCPServer {
-    config: Config,
+    config: Arc<Config>,
 }
 
 impl MCPServer {
-    pub const fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
+        Self { config: Arc::new(config) }
+    }
+
+    pub const fn from_arc(config: Arc<Config>) -> Self {
         Self { config }
     }
 
@@ -47,13 +124,17 @@ impl MCPServer {
         let mut stdout = tokio::io::stdout();
         let mut line = String::with_capacity(1024);
         let mut response_buf = Vec::with_capacity(65536);
+        let max = self.config.server.max_request_bytes;
 
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => {
+            match read_line_capped(&mut reader, &mut line, max).await {
+                Ok(LineRead::Eof) => break,
+                Ok(LineRead::Line) => {
                     process_one_line(&line, &self.config, &mut response_buf, &mut stdout).await?;
+                }
+                Ok(LineRead::TooLong) => {
+                    write_oversize_error(&mut response_buf, &mut stdout, max).await?;
+                    break;
                 }
                 Err(e) => {
                     error!("IO error: {}", e);
@@ -69,34 +150,64 @@ impl MCPServer {
         let listener = TcpListener::bind(&addr).await?;
         tracing::info!("MCP filesystem server listening on {}", addr);
 
+        // Bound concurrent connections to prevent a connection-flood DoS.
+        let limiter = Arc::new(Semaphore::new(self.config.server.max_connections));
+
         loop {
+            // Acquire a permit before accepting so we apply backpressure.
+            let permit = Arc::clone(&limiter).acquire_owned().await
+                .expect("connection semaphore closed");
             let (socket, peer_addr) = listener.accept().await?;
             if let Err(e) = socket.set_nodelay(true) {
                 warn!("Failed to set TCP_NODELAY: {}", e);
             }
 
-            let config = self.config.clone();
+            let config = Arc::clone(&self.config);
             tokio::spawn(async move {
                 if let Err(e) = handle_client(socket, config).await {
                     error!("Client {} error: {}", peer_addr, e);
                 }
+                drop(permit);
             });
         }
     }
 }
 
-async fn handle_client(socket: TcpStream, config: Config) -> MCSResult<()> {
+async fn handle_client(socket: TcpStream, config: Arc<Config>) -> MCSResult<()> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
     let mut line = String::with_capacity(1024);
     let mut response_buf = Vec::with_capacity(65536);
+    let max = config.server.max_request_bytes;
+
+    // When an auth token is configured, require the first line to present it
+    // before any request is processed.
+    if let Some(expected) = config.server.auth_token.as_deref() {
+        match read_line_capped(&mut reader, &mut line, max).await {
+            Ok(LineRead::Line) if token_matches(&line, expected) => {}
+            Ok(LineRead::Eof) => return Ok(()),
+            _ => {
+                let err = MCSError::InvalidParams("Authentication required: send the bearer token as the first line".into());
+                let response = JsonRpcResponse::error(None, err.error_code(), err.to_string());
+                response_buf.clear();
+                serde_json::to_writer(&mut response_buf, &response)?;
+                response_buf.extend_from_slice(NEWLINE);
+                writer.write_all(&response_buf).await?;
+                writer.flush().await?;
+                return Ok(());
+            }
+        }
+    }
 
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {
+        match read_line_capped(&mut reader, &mut line, max).await {
+            Ok(LineRead::Eof) => break,
+            Ok(LineRead::Line) => {
                 process_one_line(&line, &config, &mut response_buf, &mut writer).await?;
+            }
+            Ok(LineRead::TooLong) => {
+                write_oversize_error(&mut response_buf, &mut writer, max).await?;
+                break;
             }
             Err(e) => {
                 error!("IO error: {}", e);
@@ -104,6 +215,21 @@ async fn handle_client(socket: TcpStream, config: Config) -> MCSResult<()> {
             }
         }
     }
+    Ok(())
+}
+
+async fn write_oversize_error<W: AsyncWriteExt + Unpin>(
+    response_buf: &mut Vec<u8>,
+    writer: &mut W,
+    max: usize,
+) -> MCSResult<()> {
+    let err = MCSError::InvalidParams(format!("Request exceeds maximum size of {max} bytes"));
+    let response = JsonRpcResponse::error(None, err.error_code(), err.to_string());
+    response_buf.clear();
+    serde_json::to_writer(&mut *response_buf, &response)?;
+    response_buf.extend_from_slice(NEWLINE);
+    writer.write_all(response_buf).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -116,9 +242,13 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
     let (response, is_notification) = match parse_request(line) {
         Ok(req) => {
             let is_notif = req.id.is_none();
-            match process_request(&req, config).await {
-                Ok(result) => (JsonRpcResponse::success(req.id, result), is_notif),
-                Err(e) => (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif),
+            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config)).await {
+                Ok(Ok(result)) => (JsonRpcResponse::success(req.id, result), is_notif),
+                Ok(Err(e)) => (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif),
+                Err(_) => {
+                    let e = timeout_error(config);
+                    (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif)
+                }
             }
         }
         Err(e) => (parse_error(e), false),
@@ -158,10 +288,21 @@ fn handle_notification(method: &str) -> MCSResult<Value> {
 }
 
 pub async fn process_request_http(req: &JsonRpcRequest, config: &Config) -> JsonRpcResponse {
-    match process_request(req, config).await {
-        Ok(result) => JsonRpcResponse::success(req.id.clone(), result),
-        Err(e) => JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string()),
+    match tokio::time::timeout(config.server.request_timeout, process_request(req, config)).await {
+        Ok(Ok(result)) => JsonRpcResponse::success(req.id.clone(), result),
+        Ok(Err(e)) => JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string()),
+        Err(_) => {
+            let e = timeout_error(config);
+            JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string())
+        }
     }
+}
+
+fn timeout_error(config: &Config) -> MCSError {
+    MCSError::FilesystemError(format!(
+        "Request timed out after {}s",
+        config.server.request_timeout.as_secs()
+    ))
 }
 
 fn handle_initialize(_req: &JsonRpcRequest) -> MCSResult<Value> {
@@ -276,6 +417,36 @@ mod tests {
     fn test_parse_invalid_json() {
         let err = parse_request("{invalid}").unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn test_token_matches() {
+        assert!(token_matches("secret", "secret"));
+        assert!(token_matches("Bearer secret", "secret"));
+        assert!(token_matches("  Bearer secret  ", "secret"));
+        assert!(!token_matches("wrong", "secret"));
+        assert!(!token_matches("secre", "secret"));
+        assert!(!token_matches("", "secret"));
+    }
+
+    #[tokio::test]
+    async fn test_read_line_capped_rejects_oversize() {
+        // A line longer than the cap, without a newline, must be rejected.
+        let data = vec![b'a'; 1024];
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+        let res = read_line_capped(&mut reader, &mut line, 100).await.unwrap();
+        assert!(matches!(res, LineRead::TooLong));
+    }
+
+    #[tokio::test]
+    async fn test_read_line_capped_reads_line() {
+        let data = b"hello\nworld\n";
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+        let res = read_line_capped(&mut reader, &mut line, 100).await.unwrap();
+        assert!(matches!(res, LineRead::Line));
+        assert_eq!(line, "hello\n");
     }
 
     #[test]

@@ -22,18 +22,21 @@ fn test_dir() -> &'static PathBuf {
 
 fn test_config() -> mcp_filesystem::config::Config {
     let dir = test_dir().to_string_lossy().to_string();
-    mcp_filesystem::config::Config {
-        allowed_directories: vec![dir],
-        server: mcp_filesystem::config::ServerConfig {
+    mcp_filesystem::config::Config::new(
+        vec![dir],
+        mcp_filesystem::config::ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
             http_port: 0,
             request_timeout: std::time::Duration::from_secs(5),
             access_mode: mcp_filesystem::config::AccessMode::Unrestricted,
             follow_symlinks: false,
+            max_request_bytes: 16 * 1024 * 1024,
+            auth_token: None,
+            max_connections: 1024,
         },
-        max_file_size: 100 * 1024 * 1024,
-    }
+        100 * 1024 * 1024,
+    )
 }
 
 fn t(path: &str) -> PathBuf {

@@ -9,7 +9,6 @@ use std::path::{Component, Path, PathBuf};
 // ──────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-#[repr(align(64))]
 struct PathTrieNode {
     children: Vec<(String, PathTrieNode)>,
     is_end: bool,
@@ -41,7 +40,6 @@ impl PathTrieNode {
 /// Allows fast checking of whether a given path is under any of the
 /// inserted prefix paths.
 #[derive(Clone, Debug)]
-#[repr(align(64))]
 pub struct PathTrie {
     root: PathTrieNode,
 }
@@ -198,7 +196,6 @@ impl Default for PathTrie {
 /// A fixed-capacity ring buffer (circular buffer).
 /// When full, new items overwrite the oldest items.
 #[derive(Clone, Debug)]
-#[repr(align(64))]
 pub struct RingBuffer<T> {
     buffer: Vec<Option<T>>,
     head: usize,
@@ -317,7 +314,6 @@ impl<'a, T> Iterator for RingBufferIter<'a, T> {
 /// A simple LRU (Least Recently Used) cache with fixed capacity.
 /// Uses O(n) linear scan; suitable for small caches (≤256 entries).
 #[derive(Debug, Clone)]
-#[repr(align(64))]
 pub struct LruCache<K, V> {
     entries: VecDeque<(K, V)>,
     capacity: usize,
@@ -394,7 +390,6 @@ impl<K: Eq, V> LruCache<K, V> {
 /// Uses binary search for insertion (O(log n)) and
 /// linear shift (O(n)). Best for small to medium collections.
 #[derive(Debug, Clone)]
-#[repr(align(64))]
 pub struct SortedVec<T: Ord> {
     inner: Vec<T>,
 }
@@ -505,7 +500,6 @@ impl<'a, T: Ord> IntoIterator for &'a SortedVec<T> {
 
 /// A simple Bloom filter for probabilistic set membership checks.
 /// Supports insert and contains with configurable false positive rate.
-#[repr(align(64))]
 pub struct BloomFilter {
     bits: Vec<u64>,
     num_hashes: usize,

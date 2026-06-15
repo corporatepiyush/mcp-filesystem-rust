@@ -1,6 +1,6 @@
 [package]
 name = "mcp-filesystem"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Piyush"]
 description = "High-performance MCP server for filesystem access with parallel async I/O, glob search, media detection, and secure path sandboxing"
@@ -16,7 +16,7 @@ include = ["src/", "tools.json", "Cargo.toml", "README.md", "LICENSE"]
 # Async runtime
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync", "io-std", "fs", "process"] }
 
-# HTTP/2 and SSE
+# HTTP (JSON-RPC over POST /rpc)
 axum = "0.7"
 hyper = { version = "1.0", features = ["full"] }
 futures = "0.3"
@@ -58,6 +58,7 @@ rsa = { version = "0.9", features = ["pem"] }
 pqcrypto-mlkem = "0.1"
 pqcrypto-traits = "0.3"
 rand = "0.8"
+zeroize = "1"
 
 # Logging
 tracing = "0.1"

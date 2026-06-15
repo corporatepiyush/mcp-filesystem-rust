@@ -5,13 +5,13 @@
 
 A high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for filesystem access, written in Rust on the Tokio async runtime.
 
-It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio**, **TCP** (JSON-RPC), and **HTTP/2 + SSE** transports, all behind a strict path sandbox.
+It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio**, **TCP** (line-delimited JSON-RPC), and **HTTP** (`POST /rpc`) transports, all behind a strict path sandbox.
 
 ## Features
 
 - **Parallel async I/O** built on Tokio with the `mimalloc` allocator and zero-copy memory-mapped reads.
 - **Secure path sandboxing** — every path is validated against an allow-list (via a `PathTrie`) with symlink-escape protection.
-- **Multiple transports** — stdio (for MCP clients), TCP JSON-RPC, and HTTP/2 with Server-Sent Events.
+- **Multiple transports** — stdio (for MCP clients), TCP line-delimited JSON-RPC, and an HTTP JSON-RPC endpoint (`POST /rpc`, `GET /health`).
 - **Access modes** — `unrestricted` or `readonly` (write tools are rejected in readonly mode).
 - **41 tools**, including:
   - **Files**: read/write/edit, copy/move/delete, directory listing & trees, metadata, permissions, disk usage, symlinks, ranged reads.
@@ -88,7 +88,18 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 | `--stdio` | `false` | Run in stdio mode for MCP compatibility |
 | `--access-mode <MODE>` | `unrestricted` | `unrestricted` or `readonly` |
 | `--follow-symlinks` | `false` | Follow symbolic links |
-| `--request-timeout <SECS>` | `30` | Request timeout in seconds |
+| `--request-timeout <SECS>` | `30` | Request timeout in seconds (enforced per request) |
+| `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
+| `--max-request-bytes <BYTES>` | `16777216` | Max size of a single TCP/stdio request line |
+| `--auth-token <TOKEN>` | — | Bearer token required on TCP (first line) and HTTP (`Authorization` header) |
+| `--max-connections <N>` | `1024` | Maximum concurrent TCP connections |
+
+## Security
+
+- **Path sandboxing**: every path is canonicalized and checked against the allow-list. Symlink components are rejected unless `--follow-symlinks` is set; write destinations whose final component is a symlink are also rejected.
+- **Network exposure**: the default bind is loopback (`127.0.0.1`). Binding to a non-loopback host without `--auth-token` logs a prominent warning — the allow-listed directories would otherwise be reachable, unauthenticated, over the network.
+- **Resource limits**: request lines are size-capped (`--max-request-bytes`), requests are time-bounded (`--request-timeout`), decompression output is capped (`--max-decompressed-size`), and concurrent connections are bounded (`--max-connections`).
+- **Known advisory**: the `rsa` crate is subject to the Marvin timing side-channel ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). Because encryption here is local (no remote timing oracle) the practical risk is low; it is acknowledged in [`audit.toml`](audit.toml). Prefer AES-GCM, ChaCha20-Poly1305, or ML-KEM.
 
 ## Development
 

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use mcp_filesystem::{Args, config, http, server};
-use tracing::info;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -22,12 +23,19 @@ async fn main() -> Result<()> {
     info!("Starting MCP Filesystem Server");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
-    let config = config::Config::from_args(&args)?;
+    let config = Arc::new(config::Config::from_args(&args)?);
     info!("Allowed directories: {:?}", config.allowed_directories);
     info!("Access mode: {:?}", config.server.access_mode);
 
-    let mcp_server = server::MCPServer::new(config.clone());
+    let mcp_server = server::MCPServer::from_arc(Arc::clone(&config));
     info!("Server initialized successfully");
+
+    if !is_loopback_host(&config.server.host) && config.server.auth_token.is_none() && !args.stdio {
+        warn!(
+            "Binding to non-loopback host '{}' WITHOUT authentication — all allowed directories are exposed to the network. Set --auth-token to require a bearer token.",
+            config.server.host
+        );
+    }
 
     if args.stdio {
         info!("Running in stdio mode");
@@ -42,7 +50,7 @@ async fn main() -> Result<()> {
             }
         });
 
-        let http_config = config.clone();
+        let http_config = Arc::clone(&config);
         let http_port = args.http_port;
         let http_handle = tokio::spawn(async move {
             if let Err(e) = http::create_http_server(http_config, http_port).await {
@@ -58,6 +66,10 @@ async fn main() -> Result<()> {
 
     info!("Server shutdown complete");
     Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost") || host.starts_with("127.")
 }
 
 fn init_tracing(log_level: &str) -> Result<()> {

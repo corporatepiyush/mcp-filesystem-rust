@@ -11,7 +11,7 @@ use memmap2::Mmap;
 
 pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_destination(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_destination(&path, config)?;
 
     if valid_path.exists() {
         let overwrite = get_opt_bool(args, "overwrite").unwrap_or(false);
@@ -63,7 +63,7 @@ pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> 
 
 pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let limit = get_opt_u64(args, "limit").unwrap_or(u64::MAX).min(10_000);
     let offset = get_opt_u64(args, "offset").unwrap_or(0);
     let filter_cols: Option<Vec<String>> = get_opt_str_array(args, "columns");
@@ -112,7 +112,7 @@ pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
 
 pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let added = add_rows_from_args(&mut data, args)?;
@@ -131,7 +131,7 @@ pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value>
 
 pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let row_idx = get_opt_u64(args, "row")
@@ -147,7 +147,14 @@ pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Va
     }
 
     let column_name = data.headers[col_idx].clone();
-    data.rows[row_idx][col_idx] = value.clone();
+    // Flexible CSV parsing allows ragged rows shorter than the header; pad so
+    // the indexed assignment can never panic.
+    let target_len = data.headers.len();
+    let row = &mut data.rows[row_idx];
+    if col_idx >= row.len() {
+        row.resize(target_len.max(col_idx + 1), String::new());
+    }
+    row[col_idx] = value.clone();
     write_csv_file(&valid_path, data).await?;
 
     Ok(json!({
@@ -163,7 +170,7 @@ pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Va
 
 pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let row_idx = get_opt_u64(args, "row")
@@ -192,7 +199,7 @@ pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let column = get_str_arg(args, "column")?;
@@ -224,7 +231,7 @@ pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let col_idx = resolve_column(&data, args)?;
@@ -250,7 +257,7 @@ pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<
 
 pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let old_name = get_str_arg(args, "oldName")?;
@@ -280,7 +287,7 @@ pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<
 
 pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let column = get_str_arg(args, "column")?;
     let start = get_opt_u64(args, "start").unwrap_or(0) as usize;
     let end = get_opt_u64(args, "end").map(|e| e as usize);
@@ -322,7 +329,7 @@ pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config)
 
 pub async fn csv_read_row_range(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let start = get_opt_u64(args, "start").unwrap_or(0) as usize;
     let end = get_opt_u64(args, "end").map(|e| e as usize);
 
@@ -366,48 +373,61 @@ struct CsvData {
     rows: Vec<Vec<String>>,
 }
 
+/// Files below this size are read with a plain `read`; larger ones are mapped.
+const CSV_MMAP_THRESHOLD: u64 = 256 * 1024;
+
 async fn read_csv_file(path: &Path) -> Result<CsvData> {
     let path_buf = path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<CsvData, String> {
         let file = std::fs::File::open(&path_buf)
             .map_err(|e| format!("Cannot open CSV: {e}"))?;
         let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-        let mmap = unsafe {
-            Mmap::map(&file)
-                .map_err(|e| format!("Cannot mmap CSV: {e}"))?
-        };
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .flexible(true)
-            .from_reader(mmap.as_ref());
-
-        let headers: Vec<String> = rdr.headers()
-            .map_err(|e| format!("Cannot read CSV headers: {e}"))?
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let column_map: HashMap<String, usize> = headers.iter().enumerate()
-            .map(|(i, h)| (h.clone(), i))
-            .collect();
-
-        let estimated_rows = if file_size > 0 && !headers.is_empty() {
-            (file_size as usize / (headers.len() * 16)).max(64)
+        if file_size < CSV_MMAP_THRESHOLD {
+            let bytes = std::fs::read(&path_buf)
+                .map_err(|e| format!("Cannot read CSV: {e}"))?;
+            parse_csv(&bytes, file_size)
         } else {
-            0
-        };
-        let mut rows = Vec::with_capacity(estimated_rows);
-        for result in rdr.records() {
-            let record = result.map_err(|e| format!("Cannot read CSV record: {e}"))?;
-            let row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-            rows.push(row);
+            let mmap = unsafe {
+                Mmap::map(&file)
+                    .map_err(|e| format!("Cannot mmap CSV: {e}"))?
+            };
+            parse_csv(&mmap, file_size)
         }
-
-        Ok(CsvData { headers, column_map, rows })
     }).await.map_err(|e| MCSError::FilesystemError(format!("CSV read task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
     Ok(result)
+}
+
+fn parse_csv(data: &[u8], file_size: u64) -> std::result::Result<CsvData, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(data);
+
+    let headers: Vec<String> = rdr.headers()
+        .map_err(|e| format!("Cannot read CSV headers: {e}"))?
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let column_map: HashMap<String, usize> = headers.iter().enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
+
+    let estimated_rows = if file_size > 0 && !headers.is_empty() {
+        (file_size as usize / (headers.len() * 16)).max(64)
+    } else {
+        0
+    };
+    let mut rows = Vec::with_capacity(estimated_rows);
+    for result in rdr.records() {
+        let record = result.map_err(|e| format!("Cannot read CSV record: {e}"))?;
+        let row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        rows.push(row);
+    }
+
+    Ok(CsvData { headers, column_map, rows })
 }
 
 async fn write_csv_file(path: &Path, data: CsvData) -> Result<()> {

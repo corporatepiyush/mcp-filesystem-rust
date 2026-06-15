@@ -38,6 +38,10 @@ pub struct Args {
     #[arg(long, default_value = "100")]
     pub max_file_size: u64,
 
+    /// Maximum decompressed output size in MB (guards against decompression bombs)
+    #[arg(long, default_value = "1024")]
+    pub max_decompressed_size: u64,
+
     /// Run in stdio mode for MCP compatibility
     #[arg(long)]
     pub stdio: bool,
@@ -53,4 +57,18 @@ pub struct Args {
     /// Request timeout in seconds
     #[arg(long, default_value = "30")]
     pub request_timeout: u64,
+
+    /// Maximum size in bytes of a single JSON-RPC request line (TCP/stdio).
+    /// Requests exceeding this are rejected to prevent memory exhaustion.
+    #[arg(long, default_value = "16777216")]
+    pub max_request_bytes: usize,
+
+    /// Optional bearer token required to access the TCP and HTTP transports.
+    /// When unset, the transports are unauthenticated.
+    #[arg(long)]
+    pub auth_token: Option<String>,
+
+    /// Maximum number of concurrent TCP connections.
+    #[arg(long, default_value = "1024")]
+    pub max_connections: usize,
 }

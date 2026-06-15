@@ -7,6 +7,7 @@ use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use std::io::Write;
+use zeroize::Zeroizing;
 
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
@@ -42,7 +43,7 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     let key_file_opt = get_opt_str(args, "keyFile");
     let pub_key_opt = get_opt_str(args, "publicKey");
 
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let metadata = std::fs::metadata(&valid_path)
         .map_err(|e| MCSError::FilesystemError(format!("Cannot read metadata: {e}")))?;
     if !metadata.is_file() {
@@ -54,7 +55,7 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         )));
     }
 
-    let output_path = resolve_crypto_output(&valid_path, output.as_deref(), &config.allowed_directories, config.server.follow_symlinks)?;
+    let output_path = resolve_crypto_output(&valid_path, output.as_deref(), config)?;
     if output_path == valid_path {
         return Err(MCSError::InvalidParams("Output must differ from source".into()));
     }
@@ -69,27 +70,31 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         match algo_id {
             ALGO_AES256GCM | ALGO_CHACHA20 => {
                 let key = resolve_symmetric_key_extracted(key_opt, key_file_opt, generate)?;
-                let key_hex = hex::encode(&key);
+                let key_hex = Zeroizing::new(hex::encode(&*key));
                 let (header, ciphertext) = symmetric_encrypt(&file_data, &key_hex, algo_id)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
-                Ok(EncryptResult { key: Some(hex::encode(&key)) })
+                // Only return the data-encryption key when we generated it for the
+                // caller; if they supplied it (key/keyFile) they already have it.
+                let returned = if generate { Some(hex::encode(&*key)) } else { None };
+                Ok(EncryptResult { key: returned })
             }
             ALGO_RSA2048 | ALGO_RSA4096 => {
                 let bits = if algo_id == ALGO_RSA2048 { 2048 } else { 4096 };
                 let pub_pem = pub_key_opt.as_ref()
                     .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
-                let (header, ciphertext, sym_key) = rsa_encrypt(&file_data, pub_pem, bits)?;
+                let (header, ciphertext, _sym_key) = rsa_encrypt(&file_data, pub_pem, bits)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
-                Ok(EncryptResult { key: Some(hex::encode(&sym_key)) })
+                // The ephemeral DEK is recoverable with the private key; never expose it.
+                Ok(EncryptResult { key: None })
             }
             ALGO_MLKEM768 | ALGO_MLKEM1024 => {
                 let pub_hex = pub_key_opt.as_ref()
                     .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
                 let pub_bytes = hex::decode(pub_hex)
                     .map_err(|e| format!("Invalid public key hex: {e}"))?;
-                let (header, ciphertext, sym_key) = mlkem_encrypt(&file_data, &pub_bytes, algo_id)?;
+                let (header, ciphertext, _sym_key) = mlkem_encrypt(&file_data, &pub_bytes, algo_id)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
-                Ok(EncryptResult { key: Some(hex::encode(&sym_key)) })
+                Ok(EncryptResult { key: None })
             }
             _ => Err("Unsupported algorithm".to_string()),
         }
@@ -116,41 +121,40 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     let key_file_opt = get_opt_str(args, "keyFile");
     let priv_key_opt = get_opt_str(args, "privateKey");
 
-    let valid_path = validation::validate_path(&path, &config.allowed_directories, config.server.follow_symlinks)?;
+    let valid_path = validation::validate_path(&path, config)?;
     let file_data = std::fs::read(&valid_path)
         .map_err(|e| MCSError::FilesystemError(format!("Cannot read file: {e}")))?;
 
-    let (algo_id, _enc_key, _nonce, _body) = parse_encrypted(&file_data)
+    // Parse the header once; move the owned parts into the blocking task.
+    let (algo_id, enc_key, nonce, body) = parse_encrypted(&file_data)
         .map_err(|e| MCSError::InvalidParams(format!("Invalid encrypted file: {e}")))?;
+    let body = body.to_vec();
     let algorithm = id_to_algorithm(algo_id)?;
     let output = get_opt_str(args, "output");
-    let output_path = resolve_decrypt_output(&valid_path, output.as_deref(), &config.allowed_directories, config.server.follow_symlinks)?;
+    let output_path = resolve_decrypt_output(&valid_path, output.as_deref(), config)?;
 
     if output_path == valid_path {
         return Err(MCSError::InvalidParams("Output must differ from source".into()));
     }
 
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<u8>, String> {
-        let (_algo_id, enc_key, nonce, body) = parse_encrypted(&file_data)
-            .map_err(|e| format!("Parse error: {e}"))?;
-
-        match _algo_id {
+        match algo_id {
             ALGO_AES256GCM | ALGO_CHACHA20 => {
                 let key = resolve_symmetric_key_extracted(key_opt, key_file_opt, false)?;
                 let key_hex = hex::encode(&key);
-                symmetric_decrypt(body, &key_hex, &nonce, _algo_id)
+                symmetric_decrypt(&body, &key_hex, &nonce, algo_id)
             }
             ALGO_RSA2048 | ALGO_RSA4096 => {
                 let priv_pem = priv_key_opt.as_ref()
                     .ok_or_else(|| "Missing required: 'privateKey'".to_string())?;
-                rsa_decrypt(body, &enc_key, &nonce, priv_pem)
+                rsa_decrypt(&body, &enc_key, &nonce, priv_pem)
             }
             ALGO_MLKEM768 | ALGO_MLKEM1024 => {
                 let priv_hex = priv_key_opt.as_ref()
                     .ok_or_else(|| "Missing required: 'privateKey'".to_string())?;
                 let priv_bytes = hex::decode(priv_hex)
                     .map_err(|e| format!("Invalid private key hex: {e}"))?;
-                mlkem_decrypt(body, &enc_key, &nonce, &priv_bytes, _algo_id)
+                mlkem_decrypt(&body, &enc_key, &nonce, &priv_bytes, algo_id)
             }
             _ => Err("Unsupported algorithm".into()),
         }
@@ -177,7 +181,7 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
 
     // Validate output path before doing any work
     if let Some(ref out) = output {
-        validation::validate_destination(out, &config.allowed_directories, config.server.follow_symlinks)?;
+        validation::validate_destination(out, config)?;
     }
 
     let alg_clone = algorithm.clone();
@@ -561,11 +565,10 @@ fn id_to_algorithm(id: u8) -> Result<String> {
 fn resolve_crypto_output(
     source: &std::path::Path,
     explicit: Option<&str>,
-    allowed_dirs: &[String],
-    follow_symlinks: bool,
+    config: &Config,
 ) -> Result<std::path::PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, allowed_dirs, follow_symlinks)
+        validation::validate_destination(out, config)
     } else {
         let mut result = source.to_path_buf();
         let name = result.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -577,11 +580,10 @@ fn resolve_crypto_output(
 fn resolve_decrypt_output(
     source: &std::path::Path,
     explicit: Option<&str>,
-    allowed_dirs: &[String],
-    follow_symlinks: bool,
+    config: &Config,
 ) -> Result<std::path::PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, allowed_dirs, follow_symlinks)
+        validation::validate_destination(out, config)
     } else {
         let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let stripped = name.strip_suffix(".enc").unwrap_or(&name);
