@@ -30,6 +30,16 @@ From [crates.io](https://crates.io/crates/mcp-filesystem):
 cargo install mcp-filesystem
 ```
 
+From Homebrew (macOS):
+
+```sh
+brew tap corporatepiyush/mcp-filesystem
+brew install mcp-filesystem
+```
+
+> The Homebrew formula lives in [`homebrew-mcp-filesystem/`](homebrew-mcp-filesystem/). See its
+> [README](homebrew-mcp-filesystem/README.md) for tapping from a local checkout or a dedicated tap repository.
+
 Or build from source:
 
 ```sh
