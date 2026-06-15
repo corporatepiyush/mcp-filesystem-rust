@@ -856,6 +856,7 @@ async fn test_read_file_range() {
 #[tokio::test]
 async fn test_readonly_mode_blocks_write() {
     let mut config = test_config();
+    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
 
     let req = JsonRpcRequest {
@@ -868,7 +869,7 @@ async fn test_readonly_mode_blocks_write() {
         id: Some(json!(1)),
     };
 
-    let res = process_request(&req, &config).await;
+    let res = process_request(&req, &config, &sandbox).await;
     assert!(res.is_err(), "Write should fail in read-only mode");
     match res {
         Err(e) => assert!(
@@ -882,6 +883,7 @@ async fn test_readonly_mode_blocks_write() {
 #[tokio::test]
 async fn test_readonly_mode_allows_read() {
     let mut config = test_config();
+    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
     fs::write(t("readonly_read_test.txt"), "readable content").unwrap();
 
@@ -895,13 +897,14 @@ async fn test_readonly_mode_allows_read() {
         id: Some(json!(2)),
     };
 
-    let res = process_request(&req, &config).await;
+    let res = process_request(&req, &config, &sandbox).await;
     assert!(res.is_ok(), "Read should succeed in read-only mode: {:?}", res.err());
 }
 
 #[tokio::test]
 async fn test_readonly_mode_allows_tools_list() {
     let config = test_config();
+    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         method: "tools/list".into(),
@@ -909,6 +912,6 @@ async fn test_readonly_mode_allows_tools_list() {
         id: Some(json!(3)),
     };
 
-    let res = process_request(&req, &config).await;
+    let res = process_request(&req, &config, &sandbox).await;
     assert!(res.is_ok(), "tools/list should always succeed");
 }

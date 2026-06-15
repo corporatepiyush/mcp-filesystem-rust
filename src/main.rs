@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
     info!("Allowed directories: {:?}", config.allowed_directories);
     info!("Access mode: {:?}", config.server.access_mode);
 
+    let sandbox = Arc::new(mcp_filesystem::validation::Sandbox::new(&config)?);
     let mcp_server = server::MCPServer::from_arc(Arc::clone(&config));
     info!("Server initialized successfully");
 
@@ -51,9 +52,10 @@ async fn main() -> Result<()> {
         });
 
         let http_config = Arc::clone(&config);
+        let http_sandbox = Arc::clone(&sandbox);
         let http_port = args.http_port;
         let http_handle = tokio::spawn(async move {
-            if let Err(e) = http::create_http_server(http_config, http_port).await {
+            if let Err(e) = http::create_http_server(http_config, http_sandbox, http_port).await {
                 eprintln!("HTTP server error: {}", e);
             }
         });
