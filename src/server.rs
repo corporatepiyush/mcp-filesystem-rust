@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -80,16 +82,12 @@ where
 pub fn token_matches(presented: &str, expected: &str) -> bool {
     let presented = presented.trim();
     let presented = presented.strip_prefix("Bearer ").unwrap_or(presented).trim();
-    let a = presented.as_bytes();
-    let b = expected.as_bytes();
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    
+    // Use hashes to ensure constant-time comparison even if lengths differ.
+    let h_presented = Sha256::digest(presented.as_bytes());
+    let h_expected = Sha256::digest(expected.as_bytes());
+    
+    h_presented.ct_eq(&h_expected).into()
 }
 
 fn parse_error(msg: String) -> JsonRpcResponse {
