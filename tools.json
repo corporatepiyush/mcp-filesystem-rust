@@ -1,0 +1,563 @@
+[
+  {
+    "name": "read_text_file",
+    "description": "Read the complete contents of a file as UTF-8 text. Supports optional head/tail parameters to read only the first or last N lines. When head is specified, only the first N lines are streamed from disk — the rest of the file is never read, making it instant for huge files. When tail is specified, a ring buffer of the last N lines is maintained while streaming through the file, using O(tail) memory regardless of file size. Returns file content, total line count, and file size. Use this tool for inspecting files, reading configs, viewing source code, or examining logs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Absolute or relative path to the file to read. Must be within an allowed directory." },
+        "head": { "type": "number", "description": "Read only the first N lines from the start of the file. Useful for previewing large files. Cannot be combined with tail." },
+        "tail": { "type": "number", "description": "Read only the last N lines from the end of the file. Useful for checking recent log entries. Cannot be combined with head." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "read_media_file",
+    "description": "Read an image, audio, video, or other binary file from the file system and return it as base64-encoded content with automatic MIME type detection via file extension (mime_guess) and content inspection (binary vs text detection). The detected MIME type helps clients determine how to render the content (e.g., display an image, play audio). Files larger than the configured max-file-size limit will be rejected.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the media file. Can be any file type — MIME detection works for common formats like .png, .jpg, .gif, .mp3, .mp4, .pdf, etc." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "write_file",
+    "description": "Create a new file or completely overwrite the contents of an existing file with the given text content. Creates parent directories if they do not exist. This is a destructive operation — when overwriting an existing file, the previous contents are lost. Use edit_file for targeted modifications to preserve surrounding content. The file path must be within an allowed directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path where the file will be created or overwritten. Parent directories are created automatically." },
+        "content": { "type": "string", "description": "Full text content to write to the file. Replaces any existing content entirely." }
+      },
+      "required": ["path", "content"]
+    },
+    "annotations": { "idempotentHint": true, "destructiveHint": true }
+  },
+  {
+    "name": "edit_file",
+    "description": "Make targeted, pattern-based edits to an existing file using oldText/newText replacement pairs. Supports multiple simultaneous edits applied in order, with automatic whitespace normalization and indentation style preservation. Features include: indentation detection (tabs vs spaces), smart whitespace matching, and a dryRun mode to preview changes as a diff before applying. Each edit produces a diff entry showing the context around the change position. If oldText is not found, an error is recorded for that edit but other edits continue processing. Use this for surgical modifications to configuration files, source code, or documents without rewriting the entire file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to edit. File must exist and be within an allowed directory." },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "oldText": { "type": "string", "description": "Text pattern to search for in the file. Whitespace is normalized for flexible matching — indentation differences are handled automatically." },
+              "newText": { "type": "string", "description": "Replacement text. Uses the same indentation style detected in the file. Empty string effectively deletes the matched text." }
+            },
+            "required": ["oldText"]
+          },
+          "description": "Ordered list of edit operations. Each edit is applied sequentially to the result of the previous edit."
+        },
+        "dryRun": { "type": "boolean", "description": "When true, only preview the changes as diff output without modifying the file. Use this to verify edits before applying them. Default: false." }
+      },
+      "required": ["path", "edits"]
+    },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "create_directory",
+    "description": "Create a new directory at the specified path, including any missing parent directories (like mkdir -p). Succeeds silently if the directory already exists, making it safe to use for ensuring a directory structure is in place. Use this before write_file when you need to guarantee the parent directory hierarchy exists. The path must be within an allowed directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path of the directory to create. All intermediate parent directories are created automatically if they do not exist." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "idempotentHint": true }
+  },
+  {
+    "name": "list_directory",
+    "description": "List the contents of a directory, returning entries prefixed with [FILE] or [DIR] indicators for easy parsing. Entries are sorted alphabetically. Hidden files and directories (those starting with a dot) are excluded by default. Returns a flat list — use directory_tree for a recursive view with nested structure.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path of the directory to list. Must be within an allowed directory." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "list_directory_with_sizes",
+    "description": "List directory contents with [FILE] or [DIR] prefixes including individual file sizes in bytes. Supports sorting by name (alphabetical) or size (largest first). Returns a summary with total file count, directory count, and combined size. Use this for understanding disk usage at a directory level before drilling down with get_disk_usage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Directory path to list. Must be within an allowed directory." },
+        "sortBy": { "type": "string", "enum": ["name", "size"], "description": "Sort order for entries. 'name' (default) sorts alphabetically, 'size' sorts by file size descending with largest files first." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "move_file",
+    "description": "Move or rename a file or directory from source to destination. Works both for renaming within the same directory and moving across different directories. Fails with an error if the destination already exists to prevent accidental overwrites. The source must exist and both paths must be within allowed directories. For copying without removing the source, use copy_file instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "Current path of the file or directory to move." },
+        "destination": { "type": "string", "description": "Target path for the file or directory after the move. Must not already exist." }
+      },
+      "required": ["source", "destination"]
+    }
+  },
+  {
+    "name": "copy_file",
+    "description": "Copy a file from source to destination, preserving a copy at the original location. Fails if the destination already exists to prevent accidental overwrites. Both paths must be within allowed directories. For large files, this uses the operating system's optimized file copy. Use move_file instead if you want to relocate rather than duplicate.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "Path to the source file to copy." },
+        "destination": { "type": "string", "description": "Destination path for the copy. Must not already exist." }
+      },
+      "required": ["source", "destination"]
+    }
+  },
+  {
+    "name": "delete_file",
+    "description": "Permanently delete a file from the filesystem. This operation is irreversible — the file is removed immediately without any recycle bin or trash functionality. Only files (not directories) can be deleted with this tool. Use delete_directory for removing directories. Verifies the path is within an allowed directory before deletion.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to permanently delete." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "delete_directory",
+    "description": "Delete a directory. By default, only empty directories can be deleted — set recursive=true to remove a directory and all its contents. Recursive deletion is irreversible and will remove all files, subdirectories, and their contents without prompting. Use with extreme caution when recursive is enabled. Verifies the path is within an allowed directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the directory to delete." },
+        "recursive": { "type": "boolean", "description": "When true, recursively remove all files and subdirectories. When false (default), only empty directories can be deleted." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "search_files",
+    "description": "Recursively search for files and directories matching a glob-style pattern within the specified starting directory. Supports exclusion patterns to filter out unwanted results. Uses gitignore-style glob matching (e.g., '*.txt', '**/*.rs', 'src/**/*.ts'). Returns the full absolute path of each match. Hidden files and directories (starting with '.') are excluded from the search. Use grep_files when you need to search within file contents rather than by filename.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Starting directory for the recursive search. Must be within an allowed directory." },
+        "pattern": { "type": "string", "description": "Glob-style pattern to match against filenames. Examples: '*.rs' matches Rust files in the root, '**/*.md' matches all markdown files recursively, 'src/**/*.ts' matches TypeScript files under src/." },
+        "excludePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns to exclude from results. E.g., ['node_modules/**', 'target/**'] to skip dependency directories."
+        }
+      },
+      "required": ["path", "pattern"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "directory_tree",
+    "description": "Get a complete recursive JSON tree structure of directory contents. Each directory entry contains a 'children' array with nested entries. Files appear as leaf nodes without children. Supports glob-based exclusion patterns to prune branches from the tree. The output is a nested JSON structure ideal for visualization or programmatic traversal. Hidden entries (starting with '.') are excluded.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Starting directory for the tree. Must be within an allowed directory." },
+        "excludePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns to exclude entries from the tree. Matched paths and their entire subtrees are omitted."
+        }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "get_file_info",
+    "description": "Retrieve comprehensive metadata about a file or directory without reading its contents. Returns size in bytes, file type (file/directory/symlink), Unix permission bits in octal format, creation/modification/access timestamps as Unix epoch seconds, and the readonly flag. Use this to check file characteristics before deciding how to process them, or to verify changes after write operations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file or directory to inspect. Must be within an allowed directory." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "list_allowed_directories",
+    "description": "List all directories that the server is currently allowed to access. This reflects the directories configured via CLI arguments (--directories) at server startup. Operations on paths outside these directories will be rejected. Use this tool to verify the server's access scope before attempting file operations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "hash_file",
+    "description": "Compute a cryptographic hash of a file's contents using streaming I/O (64 KB chunks). Supports SHA-256, SHA-512, BLAKE3, and MD5. The file is hashed incrementally without loading it entirely into memory, making it safe for very large files. Returns the hex-encoded hash digest along with the algorithm used. Use this for file integrity verification, deduplication checks, or change detection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to hash." },
+        "algorithm": { "type": "string", "enum": ["sha256", "sha512", "blake3", "md5"], "description": "Hash algorithm to use. 'sha256' (default) — fast and widely compatible. 'sha512' — stronger but slower. 'blake3' — extremely fast, parallelizable. 'md5' — fast but cryptographically broken; use only for checksums." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "grep_files",
+    "description": "Recursively search file contents using regular expression patterns via streaming I/O. Each file is read line-by-line through a buffered reader instead of being loaded entirely into memory, making it safe for large files. Returns matching lines with file paths and line numbers, similar to the grep command. Automatically skips binary files by checking file extensions. Supports glob-based exclusion patterns. Use this for code search, log analysis, or finding pattern usages across a codebase.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Starting directory for the recursive content search." },
+        "pattern": { "type": "string", "description": "Regular expression pattern to search for in file contents. Uses Rust regex syntax. Examples: 'TODO|FIXME' for finding todos, 'fn\\s+\\w+' for matching function definitions." },
+        "excludePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns to exclude directories or files from the search. E.g., ['target/**', '*.lock'] to skip build artifacts."
+        }
+      },
+      "required": ["path", "pattern"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "set_permissions",
+    "description": "Set Unix file permissions using octal mode notation (e.g., 644 for rw-r--r--, 755 for rwxr-xr-x). Only available on Unix-like systems (macOS, Linux). The mode is applied immediately to the specified file or directory. Use get_file_info first to check current permissions before modifying them.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file or directory whose permissions will be changed." },
+        "mode": { "type": "string", "description": "Octal permission mode string. Examples: '644' (owner read/write, group/others read), '755' (owner all, group/others read/execute), '600' (owner only read/write)." }
+      },
+      "required": ["path", "mode"]
+    }
+  },
+  {
+    "name": "get_disk_usage",
+    "description": "Calculate the total disk usage of a directory or file by recursively traversing all contents. Returns the cumulative size in bytes, total file count, and directory count. For single files, returns the file's own size. This is equivalent to 'du -sb' on Unix. Use this tool to understand storage consumption, find large directories, or analyze project sizes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the directory or file to analyze for disk usage." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "create_symlink",
+    "description": "Create a symbolic link at linkPath that points to source. On Unix systems, this creates a standard POSIX symlink. On Windows, it automatically selects between directory and file symlinks based on the source type. The source must exist and be within an allowed directory. The linkPath parent directory must be within an allowed directory. Symlinks are followed or not based on the server's --follow-symlinks configuration.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "Existing file or directory that the symlink should point to." },
+        "linkPath": { "type": "string", "description": "Path where the symbolic link will be created." }
+      },
+      "required": ["source", "linkPath"]
+    }
+  },
+  {
+    "name": "read_file_range",
+    "description": "Read a specific byte range from a file without loading the entire file into memory. Uses efficient seek-based random access to read only the requested range. The requested range is capped by the maximum file size limit to prevent memory exhaustion. Useful for reading portions of very large files, implementing partial downloads, or inspecting specific sections of binary files. Returns the content as a UTF-8 string with non-decodable bytes replaced.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to read from." },
+        "offset": { "type": "integer", "description": "Zero-based byte offset to start reading from. Must be less than the file size." },
+        "length": { "type": "integer", "description": "Number of bytes to read starting from the offset. Clamped to the end of the file if offset+length exceeds file size." }
+      },
+      "required": ["path", "offset", "length"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "compress_gzip",
+    "description": "Compress a single file using gzip compression (RFC 1952) via streaming I/O. Reads the input file in chunks and pipes them through a gzip encoder directly to the output file — never loading the entire file into memory. Supports compression levels 0-9 where 0 is no compression (fastest, largest) and 9 is maximum compression (slowest, smallest). Default level 6 provides a good balance. The output file has a .gz extension by default, or you can specify a custom output path. Returns original and compressed sizes along with the compression ratio.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to compress." },
+        "level": { "type": "integer", "description": "Compression level 0-9. 0 = no compression (fast), 1 = fastest, 6 = default balance, 9 = maximum compression (slowest). Default: 6." },
+        "output": { "type": "string", "description": "Optional output path for the compressed file. Defaults to the input path with .gz appended." }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "decompress_gzip",
+    "description": "Decompress a .gz file back to its original content via streaming I/O. Reads the compressed file in chunks through a gzip decoder directly to the output file — never loading the entire decompressed content into memory. Automatically strips the .gz extension for the output filename unless an explicit output path is provided. Returns the decompressed file size.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the .gz file to decompress." },
+        "output": { "type": "string", "description": "Optional output path for the decompressed file. Defaults to the input path with .gz extension removed." }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "compress_zstd",
+    "description": "Compress a single file using Zstandard (zstd) compression via streaming I/O. Reads the input file in chunks through a zstd encoder directly to the output file — never loading the entire file into memory. Supports levels 1-22 where 1 is fastest and 22 is ultra compression (very slow, extreme memory). Default level 3 provides fast compression with good ratios. Zstd typically outperforms gzip in both speed and compression ratio. The output file has a .zst extension by default.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to compress with zstd." },
+        "level": { "type": "integer", "description": "Compression level 1-22. 1 = fastest, 3 = default (good balance), 10+ = higher compression (slower), 19-22 = ultra compression (very slow, high memory). Default: 3." },
+        "output": { "type": "string", "description": "Optional output path for the .zst file. Defaults to the input path with .zst appended." }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "decompress_zstd",
+    "description": "Decompress a .zst file back to its original content via streaming I/O. Reads the compressed file in chunks through a zstd decoder directly to the output file — never loading the entire decompressed content into memory. Automatically strips the .zst extension for the output filename unless an explicit output path is provided. Returns the decompressed file size.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the .zst file to decompress." },
+        "output": { "type": "string", "description": "Optional output path for the decompressed file. Defaults to the input path with .zst extension removed." }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "compress_tar",
+    "description": "Create a tar archive from a file or directory. Supports optional compression: 'none' (plain .tar), 'gzip' (.tar.gz), or 'zstd' (.tar.zst). When the source is a directory, all contents are recursively added to the archive while preserving the directory structure. Hidden files and directories (starting with '.') are excluded. File permissions and modification times are preserved in the archive. Use decompress_tar to extract the resulting archive.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "Source file or directory to archive. If a directory, all non-hidden contents are included recursively." },
+        "output": { "type": "string", "description": "Output path for the tar archive (e.g., 'archive.tar', 'archive.tar.gz', 'archive.tar.zst'). Must be within an allowed directory." },
+        "compression": { "type": "string", "enum": ["none", "gzip", "zstd"], "description": "Compression method. 'none' for uncompressed tar, 'gzip' for .tar.gz, 'zstd' for .tar.zst. Default: 'none'." }
+      },
+      "required": ["source", "output"]
+    }
+  },
+  {
+    "name": "decompress_tar",
+    "description": "Extract a tar archive (.tar, .tar.gz, .tar.zst) to a directory via streaming I/O. Reads from a file handle directly into the tar decoder and extracts entries incrementally \u2014 never loading the entire archive into memory. Automatically detects compression format by inspecting file header bytes: gzip (1f 8b 08) and zstd (28 b5 2f fd). Includes path traversal security checks \u2014 entries with absolute paths or '..' components are rejected.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the tar archive to extract. Supports .tar, .tar.gz, .tar.zst formats." },
+        "outputDir": { "type": "string", "description": "Directory where the archive contents will be extracted. Created automatically if it does not exist." }
+      },
+      "required": ["path", "outputDir"]
+    }
+  },
+  {
+    "name": "encrypt_file",
+    "description": "Encrypt a file using the specified algorithm. Supports symmetric (aes-256-gcm, chacha20-poly1305), asymmetric hybrid (rsa-2048-oaep, rsa-4096-oaep), and quantum-proof KEM (kyber-768, kyber-1024) encryption. For symmetric algorithms, provide a hex-encoded 32-byte key via 'key' or use 'generateKey: true' to have one created and returned. For asymmetric/KEM, provide the public key via 'publicKey'. The encrypted file uses the MCPE format with self-describing header, AEAD authentication, and AAD binding of header fields. Original file data is encrypted with AES-256-GCM (or ChaCha20-Poly1305) using a random nonce and 16-byte authentication tag. Returns the output path and, if generated, the encryption key.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the file to encrypt." },
+        "algorithm": { "type": "string", "enum": ["aes-256-gcm", "chacha20-poly1305", "rsa-2048-oaep", "rsa-4096-oaep", "kyber-768", "kyber-1024"], "description": "Encryption algorithm. 'aes-256-gcm' (default) — standard symmetric. 'chacha20-poly1305' — fast symmetric. 'rsa-2048-oaep' / 'rsa-4096-oaep' — hybrid asymmetric (encrypts random key with RSA-OAEP). 'kyber-768' / 'kyber-1024' — quantum-proof KEM (NIST standard)." },
+        "key": { "type": "string", "description": "Hex-encoded 32-byte symmetric key (for aes-256-gcm, chacha20-poly1305). Mutually exclusive with publicKey and keyFile." },
+        "publicKey": { "type": "string", "description": "Public key for asymmetric/KEM algorithms. PEM format for RSA, hex-encoded for Kyber." },
+        "keyFile": { "type": "string", "description": "Path to a file containing the key (hex for symmetric, PEM for RSA, hex for Kyber)." },
+        "generateKey": { "type": "boolean", "description": "Generate a random 32-byte symmetric key and return it in the response (symmetric algorithms only). Default: false." },
+        "output": { "type": "string", "description": "Output path for the encrypted file. Defaults to input path with .enc appended." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "decrypt_file",
+    "description": "Decrypt a file that was encrypted with encrypt_file. The algorithm is auto-detected from the MCPE file header. Provide the corresponding key: hex-encoded 32-byte symmetric key via 'key' for symmetric algorithms, PEM private key via 'privateKey' for RSA, or hex-encoded secret key via 'privateKey' for Kyber. AEAD authentication verification detects wrong keys or corrupted data and returns an error. Returns the decrypted file path and size.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the .enc file to decrypt." },
+        "key": { "type": "string", "description": "Hex-encoded 32-byte symmetric key (for aes-256-gcm, chacha20-poly1305 algorithms)." },
+        "privateKey": { "type": "string", "description": "Private key for asymmetric/KEM algorithms. PEM format for RSA, hex-encoded for Kyber." },
+        "keyFile": { "type": "string", "description": "Path to a file containing the key (hex for symmetric, PEM for RSA, hex for Kyber)." },
+        "output": { "type": "string", "description": "Output path for the decrypted file. Defaults to input path with .enc removed." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "generate_key",
+    "description": "Generate cryptographic keys for use with encrypt_file and decrypt_file. Supports: 'aes-256' — random 32-byte hex key. 'rsa-2048' / 'rsa-4096' — RSA keypair in PEM (PKCS#8) format. 'kyber-768' / 'kyber-1024' — Kyber KEM keypair as hex-encoded bytes. Keys can be written to files via 'output', and are always returned in the response. For RSA and Kyber, the secret key is written to 'output' and the public key to 'output.pub'.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "algorithm": { "type": "string", "enum": ["aes-256", "rsa-2048", "rsa-4096", "kyber-768", "kyber-1024"], "description": "Key type to generate. 'aes-256' — symmetric 32-byte key (hex). 'rsa-2048' / 'rsa-4096' — RSA keypair (PEM). 'kyber-768' / 'kyber-1024' — quantum-proof Kyber keypair (hex). Default: 'aes-256'." },
+        "output": { "type": "string", "description": "Optional path to write the key file. For RSA/Kyber, the secret key is written here and the public key to {output}.pub." }
+      },
+      "required": []
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "csv_create",
+    "description": "Create a new CSV file with the given headers and optional initial data rows. Each row must have exactly the same number of values as headers. Rows can be provided as arrays of values or omitted entirely to create an empty CSV with just headers. Fails if the file already exists unless 'overwrite' is set to true. Use this tool as the first step before any other CSV operations on a new dataset.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path where the CSV file will be created. Must be within an allowed directory. Parent directories are created automatically." },
+        "headers": { "type": "array", "items": { "type": "string" }, "description": "Column names for the CSV header row. Must have at least one entry. These become the column identifiers used by all other CSV tools." },
+        "rows": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "Optional initial data rows. Each inner array must have exactly the same number of elements as headers. Omit to create an empty CSV with only headers." },
+        "overwrite": { "type": "boolean", "description": "If true, overwrites an existing file at the given path. If false (default), fails when the file already exists to prevent accidental data loss." }
+      },
+      "required": ["path", "headers"]
+    },
+    "annotations": { "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "csv_read",
+    "description": "Read data from an existing CSV file with optional pagination (offset/limit) and column filtering. Returns headers and a subset of data rows. Use offset and limit to page through large CSV files without loading everything into memory at once. Use columns to select specific columns by name when you only need certain fields. The totalRows field indicates how many data rows exist regardless of pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to an existing CSV file within allowed directories." },
+        "limit": { "type": "number", "description": "Maximum number of data rows to return starting from offset. Omit or set to a large value to return all rows. Useful for pagination: e.g. limit=50 returns at most 50 rows." },
+        "offset": { "type": "number", "description": "Number of rows to skip before starting to return results (0-based). Defaults to 0. Combine with limit for pagination: offset=0,limit=10 for page 1; offset=10,limit=10 for page 2." },
+        "columns": { "type": "array", "items": { "type": "string" }, "description": "Optional subset of columns to include in the response, specified by header name. When omitted, all columns are returned. Use this to reduce response size when you only need a few fields." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "csv_add_row",
+    "description": "Append one or more new rows to an existing CSV file. Each row can be specified as either an array of values (positional, must match column order exactly) or an object mapping column names to values (named, missing columns become empty strings, extra keys are ignored). Mixing formats in the same call is not supported. Returns the number of rows added and the new total row count.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "rows": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "object", "additionalProperties": { "type": "string" }, "description": "Row as column:value mapping, e.g. {\"Name\": \"Alice\", \"Age\": \"30\"}. Missing columns get empty string." },
+              { "type": "array", "items": { "type": "string" }, "description": "Row as positional values, e.g. [\"Alice\", \"30\"]. Must match header count and order exactly." }
+            ]
+          },
+          "description": "Rows to append. Each row is either an object {column_name: value} or an array of string values. All rows in a single call must use the same format."
+        }
+      },
+      "required": ["path", "rows"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "csv_update_cell",
+    "description": "Update a single cell in a CSV file identified by row index and column. Row 0 is the first data row (the header is row 0). Column can be specified by name or by index. Returns the updated row index, column name, and new value. Useful for correcting individual data points without rewriting the entire file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "row": { "type": "number", "description": "Row index of the cell to update (0-based, where 0 is the first data row after the header). Must be within the range of existing rows." },
+        "column": { "type": "string", "description": "Column name to update. Mutually exclusive with columnIndex. The column must exist in the CSV header." },
+        "columnIndex": { "type": "number", "description": "Column index to update (0-based, where 0 is the first column). Mutually exclusive with column. The index must be within the range of existing columns." },
+        "value": { "type": "string", "description": "New value for the cell. Pass empty string to clear the cell." }
+      },
+      "required": ["path", "row", "value"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "csv_remove_row",
+    "description": "Permanently remove a data row from a CSV file by its index (0-based, first data row = 0). The row is deleted and remaining rows shift up. Use this to delete unwanted records. This operation cannot be undone — consider reading the file first to confirm the row to remove.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "row": { "type": "number", "description": "Index of the row to remove (0-based, where 0 is the first data row after the header). Must be within the range of existing rows." }
+      },
+      "required": ["path", "row"]
+    },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "csv_add_column",
+    "description": "Add a new column to a CSV file with an optional default value for existing rows. All existing rows get the default value (or empty string if not specified). Fails if a column with the same name already exists. Useful for extending a dataset with new fields.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "column": { "type": "string", "description": "Name of the new column. Must not already exist in the CSV headers — check with csv_read first if unsure." },
+        "defaultValue": { "type": "string", "description": "Default value to fill in all existing rows for the new column. Omit or use empty string to leave cells blank." }
+      },
+      "required": ["path", "column"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "csv_remove_column",
+    "description": "Permanently remove a column from a CSV file by name or index. All data in that column across every row is deleted. Remaining columns are compacted (no gaps remain). Use this to drop unnecessary fields from a dataset. This operation cannot be undone.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "column": { "type": "string", "description": "Name of the column to remove. Mutually exclusive with columnIndex." },
+        "columnIndex": { "type": "number", "description": "Index of the column to remove (0-based, first column = 0). Mutually exclusive with column." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "csv_rename_column",
+    "description": "Rename a column in a CSV file. Fails if the old name is not found or if the new name already exists (unless oldName equals newName, in which case this is a no-op). All data in the column is preserved. Useful for correcting spelling or standardizing column naming conventions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "oldName": { "type": "string", "description": "Current column name to rename. Must exist in the CSV headers." },
+        "newName": { "type": "string", "description": "New column name. Must not already exist (unless identical to oldName)." }
+      },
+      "required": ["path", "oldName", "newName"]
+    },
+    "annotations": { "destructiveHint": false }
+  },
+  {
+    "name": "csv_read_column_values_range",
+    "description": "Extract all values from a single column across a range of rows. Returns the column values as a flat string array. Use start and end to read a subset of rows. Maximum range window (end - start) is 1000 rows. Useful for quickly getting a list of values from one field (e.g. all email addresses, all names) without processing full row data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "column": { "type": "string", "description": "Name of the column to extract values from. The column must exist in the CSV header." },
+        "start": { "type": "number", "description": "Starting row index (0-based, inclusive). Defaults to 0 (first data row). Row 0 is the first data row after the header." },
+        "end": { "type": "number", "description": "Ending row index (0-based, exclusive). Rows from start up to (but not including) end are returned. Defaults to all rows if omitted." }
+      },
+      "required": ["path", "column"]
+    },
+    "annotations": { "readOnlyHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "csv_read_row_range",
+    "description": "Read one or more consecutive data rows from a CSV file by row index range. Returns full row data including all columns, along with the headers. By default returns only row 0. Use start and end to read a specific range. Maximum range window (end - start) is 100 rows. More efficient than csv_read + offset/limit when you need specific row indices rather than paginated access.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "start": { "type": "number", "description": "Starting row index (0-based, inclusive). Defaults to 0 (first data row). The first data row is index 0, after the header." },
+        "end": { "type": "number", "description": "Ending row index (0-based, exclusive). Rows from start up to (but not including) end are returned. Defaults to start+1 if omitted (returns a single row)." }
+      },
+      "required": ["path"]
+    },
+    "annotations": { "readOnlyHint": true, "idempotentHint": true }
+  }
+]
