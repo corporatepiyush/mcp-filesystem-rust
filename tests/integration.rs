@@ -285,10 +285,11 @@ async fn test_zstd_roundtrip() {
 async fn test_tar_roundtrip() {
     let config = test_config();
     let tar_dir = t("tar_dir");
-    let archive = tar_dir.join("archive.tar");
-    let extracted = tar_dir.join("extracted");
+    let output_dir = t("tar_output");
+    let archive = output_dir.join("archive.tar");
+    let extracted = output_dir.join("extracted");
     fs::create_dir_all(&tar_dir).unwrap();
-    fs::create_dir_all(&extracted).unwrap();
+    fs::create_dir_all(&output_dir).unwrap();
     fs::write(tar_dir.join("a.txt"), "hello").unwrap();
     fs::write(tar_dir.join("b.txt"), "world").unwrap();
 
@@ -711,6 +712,49 @@ async fn test_csv_read_range_invalid_order() {
     assert!(res.unwrap_err().to_string().contains("must be >= start"));
 }
 
+#[tokio::test]
+async fn test_csv_read_row_range_invalid_order() {
+    let config = test_config();
+    let path = t("row_range_invalid.csv");
+    mcp_filesystem::actions::csv::csv_create(Some(&json!({
+        "path": &path, "headers": ["X"],
+        "rows": [["a"], ["b"]],
+    })), &config).await.unwrap();
+
+    let args = json!({ "path": &path, "start": 3, "end": 1 });
+    let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config).await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("must be >= start"));
+}
+
+#[tokio::test]
+async fn test_delete_directory_non_recursive_fails() {
+    let config = test_config();
+    let dir = t("nonempty_dir");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("f.txt"), "x").unwrap();
+
+    let args = json!({ "path": &dir, "recursive": false });
+    let res = mcp_filesystem::actions::files::delete_directory(Some(&args), &config).await;
+    assert!(res.is_err(), "Non-recursive delete on non-empty dir should fail");
+}
+
+#[tokio::test]
+async fn test_compress_tar_source_equals_output_rejected() {
+    let config = test_config();
+    let dir = t("tar_self");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("f.txt"), "data").unwrap();
+
+    // Output inside source directory should be rejected (would cause recursive write)
+    let archive = dir.join("archive.tar");
+    let args = json!({ "source": &dir, "output": &archive });
+    let res = mcp_filesystem::actions::files::compress_tar(Some(&args), &config).await;
+    assert!(res.is_err(), "Tar with output inside source dir should be rejected");
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("not be inside"), "Unexpected error: {err}");
+}
+
 // ────────────────────────────
 //  Hash
 // ────────────────────────────
@@ -744,6 +788,18 @@ async fn test_hash_file_blake3() {
     let args = json!({ "path": t("hash_b3.txt"), "algorithm": "blake3" });
     let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config).await.unwrap();
     assert_eq!(res["hash"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn test_hash_file_md5() {
+    let config = test_config();
+    fs::write(t("hash_md5.txt"), "hello").unwrap();
+    let args = json!({ "path": t("hash_md5.txt"), "algorithm": "md5" });
+    let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config).await;
+    assert!(res.is_ok(), "hash_file md5 failed: {:?}", res.err());
+    let val = res.unwrap();
+    // md5("hello") = 5d41402abc4b2a76b9719d911017c592
+    assert_eq!(val["hash"], "5d41402abc4b2a76b9719d911017c592");
 }
 
 // ────────────────────────────
@@ -856,7 +912,6 @@ async fn test_read_file_range() {
 #[tokio::test]
 async fn test_readonly_mode_blocks_write() {
     let mut config = test_config();
-    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
 
     let req = JsonRpcRequest {
@@ -869,7 +924,7 @@ async fn test_readonly_mode_blocks_write() {
         id: Some(json!(1)),
     };
 
-    let res = process_request(&req, &config, &sandbox).await;
+    let res = process_request(&req, &config).await;
     assert!(res.is_err(), "Write should fail in read-only mode");
     match res {
         Err(e) => assert!(
@@ -883,7 +938,6 @@ async fn test_readonly_mode_blocks_write() {
 #[tokio::test]
 async fn test_readonly_mode_allows_read() {
     let mut config = test_config();
-    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
     fs::write(t("readonly_read_test.txt"), "readable content").unwrap();
 
@@ -897,14 +951,13 @@ async fn test_readonly_mode_allows_read() {
         id: Some(json!(2)),
     };
 
-    let res = process_request(&req, &config, &sandbox).await;
+    let res = process_request(&req, &config).await;
     assert!(res.is_ok(), "Read should succeed in read-only mode: {:?}", res.err());
 }
 
 #[tokio::test]
 async fn test_readonly_mode_allows_tools_list() {
     let config = test_config();
-    let sandbox = mcp_filesystem::validation::Sandbox::new(&config).unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         method: "tools/list".into(),
@@ -912,6 +965,166 @@ async fn test_readonly_mode_allows_tools_list() {
         id: Some(json!(3)),
     };
 
-    let res = process_request(&req, &config, &sandbox).await;
+    let res = process_request(&req, &config).await;
     assert!(res.is_ok(), "tools/list should always succeed");
+}
+
+// ────────────────────────────
+//  Security Regression Tests
+// ────────────────────────────
+
+#[tokio::test]
+async fn test_deep_symlink_chain_rejected() {
+    let config = test_config();
+    // Only run on Unix where symlinks are available
+    #[cfg(unix)]
+    {
+        let dir = test_dir().join("deep_symlink_chain");
+        fs::create_dir_all(&dir).unwrap();
+
+        let real_file = dir.join("real.txt");
+        fs::write(&real_file, "secret").unwrap();
+
+        let link1 = dir.join("link1");
+        let link2 = dir.join("link2");
+        let link3 = dir.join("link3");
+
+        std::os::unix::fs::symlink(&real_file, &link1).unwrap();
+        std::os::unix::fs::symlink(&link1, &link2).unwrap();
+        std::os::unix::fs::symlink(&link2, &link3).unwrap();
+
+        // Reading through a 3-level symlink chain should be rejected
+        let args = json!({ "path": &link3 });
+        let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
+        assert!(res.is_err(), "Deep symlink chain should be rejected");
+    }
+}
+
+#[tokio::test]
+async fn test_write_to_symlink_outside_allowed_rejected() {
+    let config = test_config();
+    #[cfg(unix)]
+    {
+        // Create an outside directory and symlink to it from inside allowed dir
+        let outside = std::env::temp_dir().join(format!("mcp_fs_outside_{}", std::process::id()));
+        fs::create_dir_all(&outside).unwrap();
+
+        let link = test_dir().join("outside_link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        // Trying to write through the symlink should fail
+        let target = link.join("evil.txt");
+        let args = json!({ "path": &target, "content": "pwned" });
+        let res = mcp_filesystem::actions::files::write_file(Some(&args), &config).await;
+        assert!(res.is_err(), "Write through symlink to outside should be rejected");
+
+        let _ = fs::remove_dir_all(&outside);
+    }
+}
+
+#[tokio::test]
+async fn test_destination_symlink_parent_directory_rejected() {
+    let config = test_config();
+    #[cfg(unix)]
+    {
+        let outside = std::env::temp_dir().join(format!("mcp_fs_parent_link_{}", std::process::id()));
+        fs::create_dir_all(&outside).unwrap();
+
+        // Symlink a directory inside allowed -> outside
+        let linked_dir = test_dir().join("linked_parent");
+        std::os::unix::fs::symlink(&outside, &linked_dir).unwrap();
+
+        // Write to a path through the symlinked parent
+        let target = linked_dir.join("child.txt");
+        let args = json!({ "path": &target, "content": "data" });
+        let res = mcp_filesystem::actions::files::write_file(Some(&args), &config).await;
+        assert!(res.is_err(), "Write through symlinked parent directory should be rejected");
+
+        let _ = fs::remove_dir_all(&outside);
+    }
+}
+
+#[tokio::test]
+async fn test_rename_to_symlink_target_rejected() {
+    let config = test_config();
+    #[cfg(unix)]
+    {
+        let src = test_dir().join("rename_src.txt");
+        fs::write(&src, "source data").unwrap();
+
+        let outside = std::env::temp_dir().join(format!("mcp_fs_rename_tgt_{}", std::process::id()));
+        fs::write(&outside, "target data").unwrap();
+
+        let link = test_dir().join("rename_link_target");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        // Renaming src -> link should fail (link points outside)
+        let args = json!({
+            "source": &src,
+            "destination": &link
+        });
+        let res = mcp_filesystem::actions::files::move_file(Some(&args), &config).await;
+        assert!(res.is_err(), "Rename to symlink pointing outside should be rejected");
+
+        let _ = fs::remove_file(&outside);
+    }
+}
+
+#[tokio::test]
+async fn test_copy_to_symlink_outside_rejected() {
+    let config = test_config();
+    #[cfg(unix)]
+    {
+        let src = test_dir().join("copy_src.txt");
+        fs::write(&src, "source data").unwrap();
+
+        let outside = std::env::temp_dir().join(format!("mcp_fs_copy_outside_{}", std::process::id()));
+        fs::write(&outside, "outside data").unwrap();
+
+        let link = test_dir().join("copy_link_dest");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let args = json!({
+            "source": &src,
+            "destination": &link
+        });
+        let res = mcp_filesystem::actions::files::copy_file(Some(&args), &config).await;
+        assert!(res.is_err(), "Copy to symlink pointing outside should be rejected");
+
+        let _ = fs::remove_file(&outside);
+    }
+}
+
+#[tokio::test]
+async fn test_sandbox_dot_dot_traversal_rejected() {
+    let config = test_config();
+    let dir = test_dir().to_string_lossy().to_string();
+    // Attempt to use .. to escape
+    let path = format!("{}/../../etc/passwd", dir);
+    let args = json!({ "path": &path });
+    let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
+    assert!(res.is_err(), "dot-dot path traversal should be rejected");
+}
+
+#[tokio::test]
+async fn test_sandbox_encoded_characters_rejected() {
+    let config = test_config();
+    let dir = test_dir().to_string_lossy().to_string();
+    // URL-encoded path traversal (not decoded by us, but should still validate)
+    let path = format!("{}/..%2F..%2Fetc%2Fpasswd", dir);
+    let args = json!({ "path": &path });
+    let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
+    assert!(res.is_err(), "Encoded path traversal should be rejected");
+}
+
+#[tokio::test]
+async fn test_sandbox_absolute_outside_allowed_rejected() {
+    let config = test_config();
+    let path = "/etc/passwd";
+    let args = json!({ "path": path });
+    let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
+    assert!(res.is_err(), "Absolute path outside allowed dir should be rejected");
+    if let Err(e) = &res {
+        assert!(matches!(e, mcp_filesystem::errors::MCSError::PathNotAllowed(_)));
+    }
 }

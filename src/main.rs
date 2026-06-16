@@ -7,15 +7,33 @@ use tracing::{info, warn};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Set mimalloc tuning env vars **before** any thread is spawned.
+/// Called from `main()` before the tokio runtime starts.
+/// # Safety
+/// `set_var` is safe here because no other thread exists yet in `main()`.
+fn set_mimalloc_opts() {
+    // These are read by mimalloc at first allocation. Setting them before
+    // any allocation (aside from the #[global_allocator] static itself) is
+    // required. The tokio runtime is created *after* this returns.
+    // SAFETY: we are in `main()` before spawning any threads.
     unsafe { std::env::set_var("MIMALLOC_PAGE_RESET", "0") };
     unsafe { std::env::set_var("MIMALLOC_DECOMMIT_DELAY", "1000") };
     unsafe { std::env::set_var("MIMALLOC_ARENA_EAGER_COMMIT", "1") };
     unsafe { std::env::set_var("MIMALLOC_LARGE_OS_PAGES", "1") };
     unsafe { std::env::set_var("MIMALLOC_EAGER_REGION_COMMIT", "1") };
     unsafe { std::env::set_var("MIMALLOC_RESET_DELAY", "0") };
+}
 
+fn main() -> Result<()> {
+    set_mimalloc_opts();
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        inner_main().await
+    })
+}
+
+async fn inner_main() -> Result<()> {
     let args = Args::parse();
 
     init_tracing(&args.log_level)?;
@@ -27,7 +45,6 @@ async fn main() -> Result<()> {
     info!("Allowed directories: {:?}", config.allowed_directories);
     info!("Access mode: {:?}", config.server.access_mode);
 
-    let sandbox = Arc::new(mcp_filesystem::validation::Sandbox::new(&config)?);
     let mcp_server = server::MCPServer::from_arc(Arc::clone(&config));
     info!("Server initialized successfully");
 
@@ -52,10 +69,9 @@ async fn main() -> Result<()> {
         });
 
         let http_config = Arc::clone(&config);
-        let http_sandbox = Arc::clone(&sandbox);
         let http_port = args.http_port;
         let http_handle = tokio::spawn(async move {
-            if let Err(e) = http::create_http_server(http_config, http_sandbox, http_port).await {
+            if let Err(e) = http::create_http_server(http_config, http_port).await {
                 eprintln!("HTTP server error: {}", e);
             }
         });
@@ -68,6 +84,16 @@ async fn main() -> Result<()> {
 
     info!("Server shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_mimalloc_opts_does_not_panic() {
+        set_mimalloc_opts();
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {

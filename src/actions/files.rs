@@ -6,15 +6,14 @@ use sha2::{Digest, Sha256, Sha512};
 use std::io::{BufRead, Read, Seek};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use cap_std::fs::PermissionsExt as CapPermissionsExt;
 use std::path::PathBuf;
-use tokio::fs;
-use tokio::io::AsyncBufReadExt;
 use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
 use crate::structures::RingBuffer;
-use crate::validation;
 use memmap2::Mmap;
 
 /// Files below this size are read with a plain `read` syscall; at or above it
@@ -30,20 +29,17 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
         return Err(MCSError::InvalidParams("Cannot specify both head and tail simultaneously".into()));
     }
 
-    let valid_path = validation::validate_path(&path, config)?;
-    let metadata = fs::metadata(&valid_path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            MCSError::PathNotFound(path.clone())
-        } else {
-            MCSError::FilesystemError(format!("Cannot read file metadata: {e}"))
-        }
-    })?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    if !valid_path.exists() {
+        return Err(MCSError::PathNotFound(format!("Path does not exist: {path}")));
+    }
+    let cap_meta = config.sandbox().metadata(&path).await?;
 
-    if !metadata.is_file() {
+    if !cap_meta.is_file() {
         return Err(MCSError::InvalidParams(format!("Path is not a file: {path}")));
     }
 
-    let file_size = metadata.len();
+    let file_size = cap_meta.len();
     if file_size > config.max_file_size {
         return Err(MCSError::FilesystemError(format!(
             "File size {size} exceeds maximum allowed size {max}",
@@ -54,22 +50,23 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
 
     if let Some(h) = head {
         let h = h as usize;
-        let file = fs::File::open(&valid_path).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot open file: {e}"))
-        })?;
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut result_lines = Vec::with_capacity(h);
-        let mut count = 0usize;
-        while let Some(line) = lines.next_line().await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot read file: {e}"))
-        })? {
-            if count >= h {
-                break;
+        let path_clone = valid_path.clone();
+        let (result_lines, count) = tokio::task::spawn_blocking(move || -> std::result::Result<(Vec<String>, usize), String> {
+            let file = std::fs::File::open(&path_clone)
+                .map_err(|e| format!("Cannot open file: {e}"))?;
+            let reader = std::io::BufReader::new(file);
+            let mut result_lines = Vec::with_capacity(h);
+            let mut count = 0usize;
+            for line in reader.lines() {
+                if count >= h {
+                    break;
+                }
+                count += 1;
+                result_lines.push(line.map_err(|e| format!("Cannot read file: {e}"))?);
             }
-            count += 1;
-            result_lines.push(line);
-        }
+            Ok((result_lines, count))
+        }).await.map_err(|e| MCSError::FilesystemError(format!("read_text_file task failed: {e}")))?
+          .map_err(MCSError::FilesystemError)?;
         return Ok(json!({
             "content": result_lines.join("\n"),
             "size": file_size,
@@ -80,21 +77,22 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
 
     if let Some(t) = tail {
         let t = t as usize;
-        let file = fs::File::open(&valid_path).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot open file: {e}"))
-        })?;
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut ring = RingBuffer::new(t);
-        let mut total_lines = 0usize;
-        while let Some(line) = lines.next_line().await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot read file: {e}"))
-        })? {
-            total_lines += 1;
-            ring.push(line);
-        }
+        let path_clone = valid_path.clone();
+        let (total_lines, lines) = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Vec<String>), String> {
+            let file = std::fs::File::open(&path_clone)
+                .map_err(|e| format!("Cannot open file: {e}"))?;
+            let reader = std::io::BufReader::new(file);
+            let mut ring = RingBuffer::new(t);
+            let mut total_lines = 0usize;
+            for line in reader.lines() {
+                total_lines += 1;
+                ring.push(line.map_err(|e| format!("Cannot read file: {e}"))?);
+            }
+            Ok((total_lines, ring.into_vec()))
+        }).await.map_err(|e| MCSError::FilesystemError(format!("read_text_file task failed: {e}")))?
+          .map_err(MCSError::FilesystemError)?;
         return Ok(json!({
-            "content": ring.into_vec().join("\n"),
+            "content": lines.join("\n"),
             "size": file_size,
             "totalLines": total_lines,
             "path": valid_path.to_string_lossy(),
@@ -104,7 +102,6 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
     let path_clone = valid_path.clone();
     let content = tokio::task::spawn_blocking(move || -> std::result::Result<String, String> {
         if file_size < MMAP_THRESHOLD {
-            // Small file: a single `read` into one owned buffer, no extra copy.
             let bytes = std::fs::read(&path_clone)
                 .map_err(|e| format!("Cannot read file: {e}"))?;
             Ok(match String::from_utf8(bytes) {
@@ -118,7 +115,6 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
                 Mmap::map(&file)
                     .map_err(|e| format!("Cannot mmap file: {e}"))?
             };
-            // `into_owned` avoids re-cloning when the lossy conversion already owns.
             Ok(String::from_utf8_lossy(&mmap).into_owned())
         }
     }).await.map_err(|e| MCSError::FilesystemError(format!("read_text_file task failed: {e}")))?
@@ -136,14 +132,14 @@ pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn read_media_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
-    let metadata = fs::metadata(&valid_path).await.map_err(|_| MCSError::PathNotFound(path.clone()))?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let cap_meta = config.sandbox().metadata(&path).await?;
 
-    if !metadata.is_file() {
+    if !cap_meta.is_file() {
         return Err(MCSError::InvalidParams(format!("Path is not a file: {path}")));
     }
 
-    let file_size = metadata.len();
+    let file_size = cap_meta.len();
     if file_size > config.max_file_size {
         return Err(MCSError::FilesystemError(format!(
             "File size {size} exceeds maximum allowed size {max}",
@@ -192,11 +188,9 @@ pub async fn read_media_file(args: Option<&Value>, config: &Config) -> Result<Va
 pub async fn write_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let content = get_str_arg(args, "content")?;
-    let valid_path = validation::validate_path_parent(&path, config)?;
+    let valid_path = config.sandbox().resolve_destination_path(&path)?;
 
-    fs::write(&valid_path, content).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot write file: {e}"))
-    })?;
+    config.sandbox().write(&path, content.as_bytes()).await?;
 
     Ok(json!({ "success": true, "path": valid_path.to_string_lossy() }))
 }
@@ -206,26 +200,18 @@ pub async fn edit_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let edits = get_edits_arg(args)?;
     let dry_run = get_opt_bool(args, "dryRun").unwrap_or(false);
 
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
-    let metadata = fs::metadata(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot read file metadata: {e}"))
-    })?;
-    if metadata.len() > config.max_file_size {
+    let cap_meta = config.sandbox().metadata(&path).await?;
+    if cap_meta.len() > config.max_file_size {
         return Err(MCSError::FilesystemError(format!(
             "File size {size} exceeds maximum allowed size {max}",
-            size = metadata.len(),
+            size = cap_meta.len(),
             max = config.max_file_size
         )));
     }
 
-    let content = fs::read_to_string(&valid_path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            MCSError::PathNotFound(path.clone())
-        } else {
-            MCSError::FilesystemError(format!("Cannot read file: {e}"))
-        }
-    })?;
+    let content = config.sandbox().read_to_string(&path).await?;
 
     let indent = detect_indent(&content);
     let mut result = content;
@@ -242,8 +228,6 @@ pub async fn edit_file(args: Option<&Value>, config: &Config) -> Result<Value> {
 
         if let Some(pos) = result.find(&normalized_old) {
             let end = pos + normalized_old.len();
-            // Snap context window to char boundaries so slicing can't panic on
-            // multi-byte UTF-8.
             let context_start = floor_char_boundary(&result, pos.saturating_sub(40));
             let context_end = ceil_char_boundary(&result, (end + 40).min(result.len()));
 
@@ -254,8 +238,6 @@ pub async fn edit_file(args: Option<&Value>, config: &Config) -> Result<Value> {
                 "context": format!("...{}...", &result[context_start..context_end].replace('\n', "\\n")),
             }));
 
-            // In-place splice reuses the buffer instead of allocating a fresh
-            // full-file copy per edit.
             result.replace_range(pos..end, &normalized_new);
         } else {
             diffs.push(json!({
@@ -267,9 +249,7 @@ pub async fn edit_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     }
 
     if !dry_run {
-        fs::write(&valid_path, &result).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot write file after edit: {e}"))
-        })?;
+        config.sandbox().write(&path, result.as_bytes()).await?;
     }
 
     Ok(json!({
@@ -282,34 +262,25 @@ pub async fn edit_file(args: Option<&Value>, config: &Config) -> Result<Value> {
 
 pub async fn create_directory(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path_parent(&path, config)?;
+    let valid_path = config.sandbox().resolve_destination_path(&path)?;
 
-    fs::create_dir_all(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot create directory: {e}"))
-    })?;
+    config.sandbox().create_dir_all(&path).await?;
 
     Ok(json!({ "success": true, "path": valid_path.to_string_lossy() }))
 }
 
 pub async fn list_directory(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
-    let mut read_dir = fs::read_dir(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot read directory: {e}"))
-    })?;
-
-    let mut entries = Vec::new();
-    while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
-        MCSError::FilesystemError(format!("Error reading directory entry: {e}"))
-    })? {
-        if let Ok(file_type) = entry.file_type().await {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let prefix = if file_type.is_dir() { "[DIR]" } else { "[FILE]" };
-            entries.push(format!("{prefix} {name}"));
-        }
-    }
-    // Single O(n log n) sort instead of O(n²) insertion-sorted inserts.
+    let entries_raw = config.sandbox().read_dir(&path).await?;
+    let mut entries: Vec<String> = entries_raw
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let prefix = if is_dir { "[DIR]" } else { "[FILE]" };
+            format!("{prefix} {name}")
+        })
+        .collect();
     entries.sort_unstable();
 
     Ok(json!({ "entries": entries, "path": valid_path.to_string_lossy() }))
@@ -318,38 +289,44 @@ pub async fn list_directory(args: Option<&Value>, config: &Config) -> Result<Val
 pub async fn list_directory_with_sizes(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let sort_by = get_opt_str(args, "sortBy").unwrap_or_else(|| "name".to_string());
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
-    let mut read_dir = fs::read_dir(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot read directory: {e}"))
-    })?;
+    let path_clone = valid_path.clone();
+    let (mut entries, total_files, total_dirs, combined_size) = tokio::task::spawn_blocking(
+        move || -> std::result::Result<(Vec<Value>, u64, u64, u64), String> {
+            let mut entries = Vec::new();
+            let mut total_files = 0u64;
+            let mut total_dirs = 0u64;
+            let mut combined_size = 0u64;
 
-    let mut entries = Vec::new();
-    let mut total_files = 0u64;
-    let mut total_dirs = 0u64;
-    let mut combined_size = 0u64;
+            let read_dir = std::fs::read_dir(&path_clone)
+                .map_err(|e| format!("Cannot read directory: {e}"))?;
 
-    while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
-        MCSError::FilesystemError(format!("Error reading directory entry: {e}"))
-    })? {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Ok(file_type) = entry.file_type().await else { continue; };
+            for entry in read_dir {
+                let entry = entry.map_err(|e| format!("Error reading directory entry: {e}"))?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Ok(file_type) = entry.file_type() else { continue; };
 
-        if file_type.is_dir() {
-            total_dirs += 1;
-            entries.push(json!({ "name": name, "type": "dir", "display": format!("[DIR] {name}") }));
-        } else {
-            let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
-            total_files += 1;
-            combined_size += size;
-            entries.push(json!({
-                "name": name,
-                "type": "file",
-                "size": size,
-                "display": format!("[FILE] {name} ({size} B)"),
-            }));
-        }
-    }
+                if file_type.is_dir() {
+                    total_dirs += 1;
+                    entries.push(json!({ "name": name, "type": "dir", "display": format!("[DIR] {name}") }));
+                } else {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    total_files += 1;
+                    combined_size += size;
+                    entries.push(json!({
+                        "name": name,
+                        "type": "file",
+                        "size": size,
+                        "display": format!("[FILE] {name} ({size} B)"),
+                    }));
+                }
+            }
+
+            Ok((entries, total_files, total_dirs, combined_size))
+        },
+    ).await.map_err(|e| MCSError::FilesystemError(format!("Directory listing task failed: {e}")))?
+      .map_err(MCSError::FilesystemError)?;
 
     match sort_by.as_str() {
         "size" => entries.sort_by(|a, b| {
@@ -377,16 +354,10 @@ pub async fn move_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let source = get_str_arg(args, "source")?;
     let destination = get_str_arg(args, "destination")?;
 
-    let valid_source = validation::validate_path(&source, config)?;
-    let valid_dest = validation::validate_path_parent(&destination, config)?;
+    let valid_source = config.sandbox().resolve_path(&source)?;
+    let valid_dest = config.sandbox().resolve_destination_path(&destination)?;
 
-    if valid_dest.exists() {
-        return Err(MCSError::FilesystemError(format!("Destination already exists: {}", valid_dest.display())));
-    }
-
-    fs::rename(&valid_source, &valid_dest).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot move file: {e}"))
-    })?;
+    config.sandbox().rename(&source, &destination).await?;
 
     Ok(json!({
         "success": true,
@@ -399,12 +370,10 @@ pub async fn copy_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let source = get_str_arg(args, "source")?;
     let destination = get_str_arg(args, "destination")?;
 
-    let valid_source = validation::validate_path(&source, config)?;
-    let valid_dest = validation::validate_path_parent(&destination, config)?;
+    let valid_source = config.sandbox().resolve_path(&source)?;
+    let valid_dest = config.sandbox().resolve_destination_path(&destination)?;
 
-    fs::copy(&valid_source, &valid_dest).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot copy file: {e}"))
-    })?;
+    config.sandbox().copy(&source, &destination).await?;
 
     Ok(json!({
         "success": true,
@@ -415,15 +384,16 @@ pub async fn copy_file(args: Option<&Value>, config: &Config) -> Result<Value> {
 
 pub async fn delete_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     if !valid_path.is_file() {
+        if !valid_path.exists() {
+            return Err(MCSError::PathNotFound(path));
+        }
         return Err(MCSError::InvalidParams(format!("Path is not a file: {path}")));
     }
 
-    fs::remove_file(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot delete file: {e}"))
-    })?;
+    config.sandbox().remove_file(&path).await?;
 
     Ok(json!({ "success": true, "path": valid_path.to_string_lossy() }))
 }
@@ -431,16 +401,12 @@ pub async fn delete_file(args: Option<&Value>, config: &Config) -> Result<Value>
 pub async fn delete_directory(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let recursive = get_opt_bool(args, "recursive").unwrap_or(false);
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     if recursive {
-        fs::remove_dir_all(&valid_path).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot remove directory tree: {e}"))
-        })?;
+        config.sandbox().remove_dir_all(&path).await?;
     } else {
-        fs::remove_dir(&valid_path).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot remove directory: {e}"))
-        })?;
+        config.sandbox().remove_dir(&path).await?;
     }
 
     Ok(json!({ "success": true, "path": valid_path.to_string_lossy(), "recursive": recursive }))
@@ -450,7 +416,7 @@ pub async fn search_files(args: Option<&Value>, config: &Config) -> Result<Value
     let path = get_str_arg(args, "path")?;
     let pattern = get_str_arg(args, "pattern")?;
     let exclude_patterns: Vec<String> = get_opt_str_array(args, "excludePatterns");
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     let glob = globset::Glob::new(&pattern)
         .map_err(|e| MCSError::InvalidParams(format!("Invalid glob pattern: {e}")))?
@@ -495,7 +461,7 @@ pub async fn search_files(args: Option<&Value>, config: &Config) -> Result<Value
 pub async fn directory_tree(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let exclude_patterns: Vec<String> = get_opt_str_array(args, "excludePatterns");
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     let root = valid_path.clone();
     let exclude_globs: Vec<globset::GlobMatcher> = exclude_patterns
@@ -513,38 +479,38 @@ pub async fn directory_tree(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn get_file_info(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
-    let metadata = fs::metadata(&valid_path).await.map_err(|_| MCSError::PathNotFound(path.clone()))?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let cap_meta = config.sandbox().metadata(&path).await?;
 
-    let file_type = if metadata.is_dir() {
+    let file_type = if cap_meta.is_dir() {
         "directory"
-    } else if metadata.is_symlink() {
+    } else if cap_meta.file_type().is_symlink() {
         "symlink"
     } else {
         "file"
     };
 
-    let created = metadata.created().ok().and_then(|t| {
-        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+    let created = cap_meta.created().ok().and_then(|t| {
+        t.into_std().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
     });
-    let modified = metadata.modified().ok().and_then(|t| {
-        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+    let modified = cap_meta.modified().ok().and_then(|t| {
+        t.into_std().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
     });
-    let accessed = metadata.accessed().ok().and_then(|t| {
-        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+    let accessed = cap_meta.accessed().ok().and_then(|t| {
+        t.into_std().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
     });
 
-    let permissions = format!("{:o}", metadata.permissions().mode() & 0o777);
+    let permissions = format!("{:o}", cap_meta.permissions().mode() & 0o777);
 
     Ok(json!({
         "path": valid_path.to_string_lossy(),
         "type": file_type,
-        "size": metadata.len(),
+        "size": cap_meta.len(),
         "permissions": permissions,
         "created": created,
         "modified": modified,
         "accessed": accessed,
-        "readonly": metadata.permissions().readonly(),
+        "readonly": cap_meta.permissions().readonly(),
     }))
 }
 
@@ -555,10 +521,19 @@ pub async fn list_allowed_directories(_args: Option<&Value>, config: &Config) ->
 pub async fn hash_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let algorithm = get_opt_str(args, "algorithm").unwrap_or_else(|| "sha256".to_string());
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     if !valid_path.is_file() {
         return Err(MCSError::InvalidParams(format!("Path is not a file: {path}")));
+    }
+
+    let cap_meta = config.sandbox().metadata(&path).await?;
+    if cap_meta.len() > config.max_file_size {
+        return Err(MCSError::FilesystemError(format!(
+            "File size {size} exceeds maximum allowed size {max}",
+            size = cap_meta.len(),
+            max = config.max_file_size
+        )));
     }
 
     let path_clone = valid_path.clone();
@@ -591,7 +566,7 @@ pub async fn hash_file(args: Option<&Value>, config: &Config) -> Result<Value> {
 pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let pattern = get_str_arg(args, "pattern")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     let re = regex::Regex::new(&pattern)
         .map_err(|e| MCSError::InvalidParams(format!("Invalid regex pattern: {e}")))?;
@@ -626,14 +601,11 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
                 continue;
             }
 
-            // Skip known-binary extensions via an exact static set (the old
-            // BloomFilter could false-positive and skip real text files).
             let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("");
             if is_binary_extension(ext) {
                 continue;
             }
 
-            // Per-file size cap; avoids slurping huge files into memory.
             if entry.metadata().map(|m| m.len()).unwrap_or(0) > max_bytes {
                 continue;
             }
@@ -644,7 +616,6 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
             };
             let reader = std::io::BufReader::new(file);
 
-            // Stream line-by-line; a non-UTF-8 (binary) line stops this file.
             for (idx, line) in reader.lines().enumerate() {
                 let Ok(line) = line else { break };
                 if re.is_match(&line) {
@@ -666,17 +637,16 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
 pub async fn set_permissions(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let mode_str = get_str_arg(args, "mode")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     let mode = u32::from_str_radix(&mode_str, 8)
         .map_err(|_| MCSError::InvalidParams(format!("Invalid mode: {mode_str}. Use octal format (e.g. 644, 755)")))?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&valid_path, std::fs::Permissions::from_mode(mode)).await.map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot set permissions: {e}"))
-        })?;
+        use cap_std::fs::PermissionsExt;
+        let perm = cap_std::fs::Permissions::from_mode(mode);
+        config.sandbox().set_permissions(&path, perm).await?;
     }
 
     #[cfg(not(unix))]
@@ -690,7 +660,7 @@ pub async fn set_permissions(args: Option<&Value>, config: &Config) -> Result<Va
 
 pub async fn get_disk_usage(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
 
     let root = valid_path.clone();
     let follow = config.server.follow_symlinks;
@@ -729,28 +699,10 @@ pub async fn create_symlink(args: Option<&Value>, config: &Config) -> Result<Val
     let source = get_str_arg(args, "source")?;
     let link_path = get_str_arg(args, "linkPath")?;
 
-    let valid_source = validation::validate_path(&source, config)?;
-    let valid_link = validation::validate_path_parent(&link_path, config)?;
+    let valid_source = config.sandbox().resolve_path(&source)?;
+    let valid_link = config.sandbox().resolve_destination_path(&link_path)?;
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&valid_source, &valid_link).map_err(|e| {
-            MCSError::FilesystemError(format!("Cannot create symlink: {e}"))
-        })?;
-    }
-
-    #[cfg(windows)]
-    {
-        if valid_source.is_dir() {
-            std::os::windows::fs::symlink_dir(&valid_source, &valid_link).map_err(|e| {
-                MCSError::FilesystemError(format!("Cannot create directory symlink: {e}"))
-            })?;
-        } else {
-            std::os::windows::fs::symlink_file(&valid_source, &valid_link).map_err(|e| {
-                MCSError::FilesystemError(format!("Cannot create file symlink: {e}"))
-            })?;
-        }
-    }
+    config.sandbox().create_symlink(&source, &link_path).await?;
 
     Ok(json!({
         "success": true,
@@ -768,10 +720,10 @@ pub async fn read_file_range(args: Option<&Value>, config: &Config) -> Result<Va
         return Err(MCSError::InvalidParams("offset and length must be non-negative".into()));
     }
 
-    let valid_path = validation::validate_path(&path, config)?;
-    let metadata = fs::metadata(&valid_path).await.map_err(|_| MCSError::PathNotFound(path.clone()))?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let cap_meta = config.sandbox().metadata(&path).await?;
 
-    let file_size = metadata.len() as i64;
+    let file_size = cap_meta.len() as i64;
     if offset >= file_size {
         return Err(MCSError::InvalidParams(format!("Offset {offset} exceeds file size {file_size}")));
     }
@@ -786,8 +738,6 @@ pub async fn read_file_range(args: Option<&Value>, config: &Config) -> Result<Va
 
     let path_clone = valid_path.clone();
     let content = tokio::task::spawn_blocking(move || -> std::result::Result<String, String> {
-        // Read only the requested range via seek + bounded read — no need to
-        // map the whole file.
         let mut file = std::fs::File::open(&path_clone)
             .map_err(|e| format!("Cannot open file: {e}"))?;
         file.seek(std::io::SeekFrom::Start(offset as u64))
@@ -814,16 +764,14 @@ pub async fn compress_gzip(args: Option<&Value>, config: &Config) -> Result<Valu
     let level = level.clamp(0, 9) as u32;
     let output = get_opt_str(args, "output");
 
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let output_path = resolve_output(&valid_path, output.as_deref(), ".gz", config)?;
 
     if output_path == valid_path {
         return Err(MCSError::InvalidParams("Output path must differ from source".into()));
     }
 
-    let original_size = fs::metadata(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot read file metadata: {e}"))
-    })?.len();
+    let original_size = config.sandbox().metadata(&path).await?.len();
 
     let src = valid_path.clone();
     let dst = output_path.clone();
@@ -861,7 +809,7 @@ pub async fn decompress_gzip(args: Option<&Value>, config: &Config) -> Result<Va
     let path = get_str_arg(args, "path")?;
     let output = get_opt_str(args, "output");
 
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let output_path = resolve_decompress_output(&valid_path, output.as_deref(), ".gz", config)?;
 
     if output_path == valid_path {
@@ -901,16 +849,14 @@ pub async fn compress_zstd(args: Option<&Value>, config: &Config) -> Result<Valu
     let level = level.clamp(1, 22) as i32;
     let output = get_opt_str(args, "output");
 
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let output_path = resolve_output(&valid_path, output.as_deref(), ".zst", config)?;
 
     if output_path == valid_path {
         return Err(MCSError::InvalidParams("Output path must differ from source".into()));
     }
 
-    let original_size = fs::metadata(&valid_path).await.map_err(|e| {
-        MCSError::FilesystemError(format!("Cannot read file metadata: {e}"))
-    })?.len();
+    let original_size = config.sandbox().metadata(&path).await?.len();
 
     let src = valid_path.clone();
     let dst = output_path.clone();
@@ -982,7 +928,7 @@ pub async fn decompress_zstd(args: Option<&Value>, config: &Config) -> Result<Va
     let path = get_str_arg(args, "path")?;
     let output = get_opt_str(args, "output");
 
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let output_path = resolve_decompress_output(&valid_path, output.as_deref(), ".zst", config)?;
 
     if output_path == valid_path {
@@ -1022,8 +968,12 @@ pub async fn compress_tar(args: Option<&Value>, config: &Config) -> Result<Value
     let output = get_str_arg(args, "output")?;
     let compression = get_opt_str(args, "compression").unwrap_or_else(|| "none".to_string());
 
-    let valid_source = validation::validate_path(&source, config)?;
-    let output_path = validation::validate_path_parent(&output, config)?;
+    let valid_source = config.sandbox().resolve_path(&source)?;
+    let output_path = config.sandbox().resolve_destination_path(&output)?;
+
+    if output_path == valid_source || output_path.starts_with(&valid_source) {
+        return Err(MCSError::InvalidParams("Output path must not be inside the source directory".into()));
+    }
 
     let entries = collect_tar_entries(&valid_source, config)?;
 
@@ -1049,8 +999,8 @@ pub async fn decompress_tar(args: Option<&Value>, config: &Config) -> Result<Val
     let path = get_str_arg(args, "path")?;
     let output_dir = get_str_arg(args, "outputDir")?;
 
-    let valid_path = validation::validate_path(&path, config)?;
-    let output_path = validation::validate_path_parent(&output_dir, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let output_path = config.sandbox().resolve_destination_path(&output_dir)?;
 
     let src = valid_path.clone();
     let dst = output_path.clone();
@@ -1179,7 +1129,6 @@ fn create_tar_archive(
 
     let entries_count = entries.len() as u64;
     let _ = archive.into_inner().map_err(|e| format!("Cannot finalize tar: {e}"))?;
-    // Writer is dropped here — GzEncoder and zstd Encoder flush/finish on drop
 
     Ok(TarResult {
         entries: entries_count,
@@ -1219,8 +1168,6 @@ fn extract_tar_archive_streaming(src: &std::path::Path, output: &std::path::Path
     for entry in archive.entries().map_err(|e| format!("Cannot read tar entries: {e}"))? {
         let mut entry = entry.map_err(|e| format!("Cannot read tar entry: {e}"))?;
 
-        // Reject symlink/hardlink entries: unpacking them would let a crafted
-        // archive create a link and then write "through" it, escaping `output`.
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             return Err("Tar archive contains symlink/hardlink entries, which are not allowed".to_string());
@@ -1234,7 +1181,6 @@ fn extract_tar_archive_streaming(src: &std::path::Path, output: &std::path::Path
             output.join(&path)
         };
 
-        // Enforce the cumulative extraction-size cap before writing.
         total_size = total_size.saturating_add(entry.size());
         if total_size > max_total {
             return Err(format!(
@@ -1261,7 +1207,7 @@ fn resolve_output(
     config: &Config,
 ) -> Result<PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, config)
+        config.sandbox().resolve_destination_path(out)
     } else {
         let mut result = source.to_path_buf();
         let name = result.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1277,7 +1223,7 @@ fn resolve_decompress_output(
     config: &Config,
 ) -> Result<PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, config)
+        config.sandbox().resolve_destination_path(out)
     } else {
         let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let stripped = name.strip_suffix(extension).unwrap_or(&name);
@@ -1425,7 +1371,6 @@ fn build_tree(
         .unwrap_or_default();
 
     if metadata.is_dir() {
-        // Stop descending past the depth limit, but still report the directory.
         if depth >= MAX_TREE_DEPTH {
             return json!({
                 "name": name,

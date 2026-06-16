@@ -11,7 +11,6 @@ use zeroize::Zeroizing;
 
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
-use crate::validation;
 
 use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret};
 
@@ -38,14 +37,12 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     let output = get_opt_str(args, "output");
     let generate = get_opt_bool(args, "generateKey").unwrap_or(false);
 
-    // Extract all argument values before closure
     let key_opt = get_opt_str(args, "key");
     let key_file_opt = get_opt_str(args, "keyFile");
     let pub_key_opt = get_opt_str(args, "publicKey");
 
-    let valid_path = validation::validate_path(&path, config)?;
-    let metadata = std::fs::metadata(&valid_path)
-        .map_err(|e| MCSError::FilesystemError(format!("Cannot read metadata: {e}")))?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let metadata = config.sandbox().metadata(&path).await?;
     if !metadata.is_file() {
         return Err(MCSError::InvalidParams(format!("Not a file: {path}")));
     }
@@ -61,8 +58,7 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     }
 
     let algo_id = algorithm_to_id(&algorithm)?;
-    let file_data = std::fs::read(&valid_path)
-        .map_err(|e| MCSError::FilesystemError(format!("Cannot read file: {e}")))?;
+    let file_data = config.sandbox().read(&path).await?;
 
     let dst = output_path.clone();
 
@@ -73,8 +69,6 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
                 let key_hex = Zeroizing::new(hex::encode(&*key));
                 let (header, ciphertext) = symmetric_encrypt(&file_data, &key_hex, algo_id)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
-                // Only return the data-encryption key when we generated it for the
-                // caller; if they supplied it (key/keyFile) they already have it.
                 let returned = if generate { Some(hex::encode(&*key)) } else { None };
                 Ok(EncryptResult { key: returned })
             }
@@ -84,7 +78,6 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
                     .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
                 let (header, ciphertext, _sym_key) = rsa_encrypt(&file_data, pub_pem, bits)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
-                // The ephemeral DEK is recoverable with the private key; never expose it.
                 Ok(EncryptResult { key: None })
             }
             ALGO_MLKEM768 | ALGO_MLKEM1024 => {
@@ -116,16 +109,13 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
 pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
 
-    // Extract all argument values before closure
     let key_opt = get_opt_str(args, "key");
     let key_file_opt = get_opt_str(args, "keyFile");
     let priv_key_opt = get_opt_str(args, "privateKey");
 
-    let valid_path = validation::validate_path(&path, config)?;
-    let file_data = std::fs::read(&valid_path)
-        .map_err(|e| MCSError::FilesystemError(format!("Cannot read file: {e}")))?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let file_data = config.sandbox().read(&path).await?;
 
-    // Parse the header once; move the owned parts into the blocking task.
     let (algo_id, enc_key, nonce, body) = parse_encrypted(&file_data)
         .map_err(|e| MCSError::InvalidParams(format!("Invalid encrypted file: {e}")))?;
     let body = body.to_vec();
@@ -161,8 +151,8 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     }).await.map_err(|e| MCSError::FilesystemError(format!("Decrypt task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
-    std::fs::write(&output_path, &result)
-        .map_err(|e| MCSError::FilesystemError(format!("Cannot write output: {e}")))?;
+    let output_str = output_path.to_string_lossy().to_string();
+    config.sandbox().write(&output_str, &result).await?;
 
     Ok(json!({
         "success": true,
@@ -179,9 +169,8 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
     let algorithm = get_opt_str(args, "algorithm").unwrap_or_else(|| "aes-256".to_string());
     let output = get_opt_str(args, "output");
 
-    // Validate output path before doing any work
     if let Some(ref out) = output {
-        validation::validate_destination(out, config)?;
+        config.sandbox().resolve_destination_path(out)?;
     }
 
     let alg_clone = algorithm.clone();
@@ -568,7 +557,7 @@ fn resolve_crypto_output(
     config: &Config,
 ) -> Result<std::path::PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, config)
+        config.sandbox().resolve_destination_path(out)
     } else {
         let mut result = source.to_path_buf();
         let name = result.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -583,7 +572,7 @@ fn resolve_decrypt_output(
     config: &Config,
 ) -> Result<std::path::PathBuf> {
     if let Some(out) = explicit {
-        validation::validate_destination(out, config)
+        config.sandbox().resolve_destination_path(out)
     } else {
         let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let stripped = name.strip_suffix(".enc").unwrap_or(&name);

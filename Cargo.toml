@@ -78,7 +78,6 @@ mimalloc = { version = "0.1", features = ["local_dynamic_tls", "extended", "over
 memmap2 = "0.9"
 
 # System
-libc = "0.2"
 num_cpus = "1.16"
 subtle = "2.6.1"
 cap-std = "4.0.2"

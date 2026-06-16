@@ -4,14 +4,14 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
-use crate::validation;
+
 use memmap2::Mmap;
 
 // ── Tool: csv_create ─────────────────────────────────────
 
 pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_destination(&path, config)?;
+    let valid_path = config.sandbox().resolve_destination_path(&path)?;
 
     if valid_path.exists() {
         let overwrite = get_opt_bool(args, "overwrite").unwrap_or(false);
@@ -63,7 +63,7 @@ pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> 
 
 pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let limit = get_opt_u64(args, "limit").unwrap_or(u64::MAX).min(10_000);
     let offset = get_opt_u64(args, "offset").unwrap_or(0);
     let filter_cols: Option<Vec<String>> = get_opt_str_array(args, "columns");
@@ -112,7 +112,7 @@ pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
 
 pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let added = add_rows_from_args(&mut data, args)?;
@@ -131,7 +131,7 @@ pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value>
 
 pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let row_idx = get_opt_u64(args, "row")
@@ -170,7 +170,7 @@ pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Va
 
 pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let row_idx = get_opt_u64(args, "row")
@@ -199,7 +199,7 @@ pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let column = get_str_arg(args, "column")?;
@@ -231,7 +231,7 @@ pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Val
 
 pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let col_idx = resolve_column(&data, args)?;
@@ -257,7 +257,7 @@ pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<
 
 pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let mut data = read_csv_file(&valid_path).await?;
 
     let old_name = get_str_arg(args, "oldName")?;
@@ -287,7 +287,7 @@ pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<
 
 pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let column = get_str_arg(args, "column")?;
     let start = get_opt_u64(args, "start").unwrap_or(0) as usize;
     let end = get_opt_u64(args, "end").map(|e| e as usize);
@@ -329,7 +329,7 @@ pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config)
 
 pub async fn csv_read_row_range(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let valid_path = validation::validate_path(&path, config)?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
     let start = get_opt_u64(args, "start").unwrap_or(0) as usize;
     let end = get_opt_u64(args, "end").map(|e| e as usize);
 

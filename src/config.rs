@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::structures::PathTrie;
+use crate::validation::Sandbox;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AccessMode {
@@ -48,6 +49,10 @@ pub struct Config {
     /// `Config::rebuild_trie` if `allowed_directories` is mutated.
     #[serde(skip)]
     allowed_trie: Arc<PathTrie>,
+    /// Capability-backed sandbox for all filesystem operations.
+    /// Lazily initialised on first use; never serialized.
+    #[serde(skip)]
+    sandbox: OnceLock<Arc<Sandbox>>,
 }
 
 /// Build a canonicalized `PathTrie` from a list of allowed directory strings.
@@ -112,6 +117,7 @@ impl Config {
             max_file_size: args.max_file_size * 1024 * 1024,
             max_decompressed_size: args.max_decompressed_size * 1024 * 1024,
             allowed_trie,
+            sandbox: OnceLock::new(),
         })
     }
 
@@ -124,12 +130,27 @@ impl Config {
             max_file_size,
             max_decompressed_size: 1024 * 1024 * 1024,
             allowed_trie,
+            sandbox: OnceLock::new(),
         }
     }
 
     /// Borrow the precomputed allowed-directory trie.
     pub fn allowed_trie(&self) -> &PathTrie {
         &self.allowed_trie
+    }
+
+    /// Borrow the precomputed allowed-directory trie (alias).
+    pub const fn allowed_trie_ref(&self) -> &Arc<PathTrie> {
+        &self.allowed_trie
+    }
+
+    /// Access the capability-backed sandbox, lazily initialised on first call.
+    pub fn sandbox(&self) -> &Arc<Sandbox> {
+        self.sandbox.get_or_init(|| {
+            Arc::new(
+                Sandbox::new(self).expect("failed to initialise capability sandbox"),
+            )
+        })
     }
 
     /// Rebuild the precomputed trie from the current `allowed_directories`.
@@ -159,6 +180,7 @@ impl Default for Config {
             max_file_size: 100 * 1024 * 1024,
             max_decompressed_size: 1024 * 1024 * 1024,
             allowed_trie,
+            sandbox: OnceLock::new(),
         }
     }
 }

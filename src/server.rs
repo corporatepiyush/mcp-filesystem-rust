@@ -105,18 +105,15 @@ fn parse_request(line: &str) -> std::result::Result<JsonRpcRequest, String> {
 
 pub struct MCPServer {
     config: Arc<Config>,
-    sandbox: Arc<crate::validation::Sandbox>,
 }
 
 impl MCPServer {
     pub fn new(config: Config) -> Self {
-        let sandbox = Arc::new(crate::validation::Sandbox::new(&config).expect("Failed to initialize sandbox"));
-        Self { config: Arc::new(config), sandbox }
+        Self { config: Arc::new(config) }
     }
 
-    pub fn from_arc(config: Arc<Config>) -> Self {
-        let sandbox = Arc::new(crate::validation::Sandbox::new(&config).expect("Failed to initialize sandbox"));
-        Self { config, sandbox }
+    pub const fn from_arc(config: Arc<Config>) -> Self {
+        Self { config }
     }
 
     pub async fn run_stdio(&self) -> MCSResult<()> {
@@ -131,7 +128,7 @@ impl MCPServer {
             match read_line_capped(&mut reader, &mut line, max).await {
                 Ok(LineRead::Eof) => break,
                 Ok(LineRead::Line) => {
-                    process_one_line(&line, &self.config, &self.sandbox, &mut response_buf, &mut stdout).await?;
+                    process_one_line(&line, &self.config, &mut response_buf, &mut stdout).await?;
                 }
                 Ok(LineRead::TooLong) => {
                     write_oversize_error(&mut response_buf, &mut stdout, max).await?;
@@ -165,8 +162,7 @@ impl MCPServer {
 
             let config = Arc::clone(&self.config);
             tokio::spawn(async move {
-                let sandbox = Arc::new(crate::validation::Sandbox::new(&config).expect("Failed to initialize sandbox"));
-                if let Err(e) = handle_client(socket, config, sandbox).await {
+                if let Err(e) = handle_client(socket, config).await {
                     error!("Client {} error: {}", peer_addr, e);
                 }
                 drop(permit);
@@ -175,7 +171,7 @@ impl MCPServer {
     }
 }
 
-async fn handle_client(socket: TcpStream, config: Arc<Config>, sandbox: Arc<crate::validation::Sandbox>) -> MCSResult<()> {
+async fn handle_client(socket: TcpStream, config: Arc<Config>) -> MCSResult<()> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
     let mut line = String::with_capacity(1024);
@@ -205,7 +201,7 @@ async fn handle_client(socket: TcpStream, config: Arc<Config>, sandbox: Arc<crat
         match read_line_capped(&mut reader, &mut line, max).await {
             Ok(LineRead::Eof) => break,
             Ok(LineRead::Line) => {
-                process_one_line(&line, &config, &sandbox, &mut response_buf, &mut writer).await?;
+                process_one_line(&line, &config, &mut response_buf, &mut writer).await?;
             }
             Ok(LineRead::TooLong) => {
                 write_oversize_error(&mut response_buf, &mut writer, max).await?;
@@ -238,14 +234,13 @@ async fn write_oversize_error<W: AsyncWriteExt + Unpin>(
 async fn process_one_line<W: AsyncWriteExt + Unpin>(
     line: &str,
     config: &Arc<Config>,
-    sandbox: &Arc<crate::validation::Sandbox>,
     response_buf: &mut Vec<u8>,
     writer: &mut W,
 ) -> MCSResult<()> {
     let (response, is_notification) = match parse_request(line) {
         Ok(req) => {
             let is_notif = req.id.is_none();
-            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config, sandbox)).await {
+            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config)).await {
                 Ok(Ok(result)) => (JsonRpcResponse::success(req.id, result), is_notif),
                 Ok(Err(e)) => (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif),
                 Err(_) => {
@@ -270,11 +265,11 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-pub async fn process_request(req: &JsonRpcRequest, config: &Config, _sandbox: &crate::validation::Sandbox) -> MCSResult<Value> {
+pub async fn process_request(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
     match req.method.as_str() {
         "initialize" => handle_initialize(req),
         "tools/list" => handle_tools_list(),
-        "tools/call" => handle_tools_call(req, config, _sandbox).await,
+        "tools/call" => handle_tools_call(req, config).await,
         "ping" => handle_ping(),
         method if method.starts_with("notifications/") => handle_notification(method),
         _ => Err(MCSError::MethodNotFound(req.method.clone())),
@@ -290,8 +285,8 @@ fn handle_notification(method: &str) -> MCSResult<Value> {
     Ok(Value::Null)
 }
 
-pub async fn process_request_http(req: &JsonRpcRequest, config: &Config, sandbox: &crate::validation::Sandbox) -> JsonRpcResponse {
-    match tokio::time::timeout(config.server.request_timeout, process_request(req, config, sandbox)).await {
+pub async fn process_request_http(req: &JsonRpcRequest, config: &Config) -> JsonRpcResponse {
+    match tokio::time::timeout(config.server.request_timeout, process_request(req, config)).await {
         Ok(Ok(result)) => JsonRpcResponse::success(req.id.clone(), result),
         Ok(Err(e)) => JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string()),
         Err(_) => {
@@ -330,7 +325,7 @@ fn handle_tools_list() -> MCSResult<Value> {
     Ok(serde_json::from_slice(&TOOLS_LIST_RESPONSE)?)
 }
 
-async fn handle_tools_call(req: &JsonRpcRequest, config: &Config, _sandbox: &crate::validation::Sandbox) -> MCSResult<Value> {
+async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
     let tool_name = req
         .params
         .as_ref()

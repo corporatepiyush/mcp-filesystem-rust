@@ -14,12 +14,11 @@ use crate::protocol::JsonRpcRequest;
 #[derive(Clone)]
 pub struct HttpState {
     pub config: Arc<Config>,
-    pub sandbox: Arc<crate::validation::Sandbox>,
 }
 
-pub async fn create_http_server(config: Arc<Config>, sandbox: Arc<crate::validation::Sandbox>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn create_http_server(config: Arc<Config>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let host = config.server.host.clone();
-    let http_state = HttpState { config, sandbox };
+    let http_state = HttpState { config };
 
     let app = Router::new()
         .route("/rpc", axum::routing::post(handle_rpc))
@@ -49,7 +48,7 @@ async fn handle_rpc(
         }
     }
     debug!("HTTP RPC request: {:?}", req.method);
-    let response = crate::server::process_request_http(&req, &state.config, &state.sandbox).await;
+    let response = crate::server::process_request_http(&req, &state.config).await;
     Json(response).into_response()
 }
 

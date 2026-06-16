@@ -3,3 +3,4 @@
 *.pdb
 Cargo.lock
 UPGRADE_PLAN.md
+SECURITY_AND_PERFORMANCE.md
