@@ -969,56 +969,106 @@ async fn test_readonly_mode_allows_tools_list() {
     assert!(res.is_ok(), "tools/list should always succeed");
 }
 
+async fn csv_dispatch(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({ "name": name, "arguments": args })),
+        id: Some(json!(1)),
+    };
+    process_request(&req, config).await
+}
+
+async fn csv_dispatch_ok(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> serde_json::Value {
+    csv_dispatch(config, name, args).await.expect(&format!("{name} via dispatch failed"))
+}
+
+async fn csv_dispatch_err(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> String {
+    csv_dispatch(config, name, args).await.unwrap_err().to_string()
+}
+
 #[tokio::test]
-async fn test_csv_via_full_dispatch() {
+async fn test_csv_all_tools_via_dispatch() {
     let config = test_config();
-    let path = t("dispatch.csv");
+    let dir = test_dir().to_string_lossy().to_string();
 
-    // Create CSV through JSON-RPC dispatch
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        method: "tools/call".into(),
-        params: Some(json!({
-            "name": "csv_create",
-            "arguments": {
-                "path": &path,
-                "headers": ["A", "B"],
-                "rows": [["1", "2"], ["3", "4"]]
-            }
-        })),
-        id: Some(json!(100)),
-    };
-    let res = process_request(&req, &config).await;
-    assert!(res.is_ok(), "csv_create via dispatch failed: {:?}", res.err());
+    // 1. csv_create
+    let path = format!("{dir}/csv_all_dispatch.csv");
+    let val = csv_dispatch_ok(&config, "csv_create", json!({
+        "path": &path, "headers": ["Name", "Age", "City"],
+        "rows": [["Alice", "30", "NYC"], ["Bob", "25", "SF"]],
+    })).await;
+    assert_eq!(val["rowsCreated"], 2);
 
-    // Read CSV through JSON-RPC dispatch
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        method: "tools/call".into(),
-        params: Some(json!({
-            "name": "csv_read",
-            "arguments": { "path": &path }
-        })),
-        id: Some(json!(101)),
-    };
-    let res = process_request(&req, &config).await;
-    assert!(res.is_ok(), "csv_read via dispatch failed: {:?}", res.err());
-    let val = res.unwrap();
+    // 2. csv_read
+    let val = csv_dispatch_ok(&config, "csv_read", json!({ "path": &path })).await;
     assert_eq!(val["totalRows"], 2);
-    assert_eq!(val["rows"][0][0], "1");
+    assert_eq!(val["headers"][0], "Name");
+    assert_eq!(val["rows"][0][0], "Alice");
 
-    // Unknown tool name should be rejected at dispatch level
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".into(),
-        method: "tools/call".into(),
-        params: Some(json!({
-            "name": "csv_nonexistent_tool",
-            "arguments": {}
-        })),
-        id: Some(json!(102)),
-    };
-    let res = process_request(&req, &config).await;
-    assert!(res.is_err(), "Unknown CSV tool should be rejected at dispatch");
+    // 3. csv_add_row (array format)
+    let val = csv_dispatch_ok(&config, "csv_add_row", json!({
+        "path": &path, "rows": [["Carol", "35", "LA"]],
+    })).await;
+    assert_eq!(val["rowsAdded"], 1);
+    assert_eq!(val["totalRows"], 3);
+
+    // 4. csv_update_cell
+    let val = csv_dispatch_ok(&config, "csv_update_cell", json!({
+        "path": &path, "row": 0, "column": "Age", "value": "31",
+    })).await;
+    assert_eq!(val["value"], "31");
+
+    // 5. csv_read_column_values_range
+    let val = csv_dispatch_ok(&config, "csv_read_column_values_range", json!({
+        "path": &path, "column": "Name",
+    })).await;
+    assert_eq!(val["column"], "Name");
+    assert_eq!(val["values"].as_array().unwrap().len(), 3);
+
+    // 6. csv_read_row_range
+    let val = csv_dispatch_ok(&config, "csv_read_row_range", json!({
+        "path": &path, "start": 0, "end": 2,
+    })).await;
+    assert_eq!(val["rows"].as_array().unwrap().len(), 2);
+
+    // 7. csv_add_column
+    let val = csv_dispatch_ok(&config, "csv_add_column", json!({
+        "path": &path, "column": "Salary", "defaultValue": "0",
+    })).await;
+    assert_eq!(val["column"], "Salary");
+
+    // 8. csv_rename_column
+    csv_dispatch_ok(&config, "csv_rename_column", json!({
+        "path": &path, "oldName": "Salary", "newName": "Income",
+    })).await;
+    // verify via read
+    let val = csv_dispatch_ok(&config, "csv_read", json!({ "path": &path })).await;
+    assert!(val["headers"].as_array().unwrap().contains(&json!("Income")));
+
+    // 9. csv_remove_column
+    let val = csv_dispatch_ok(&config, "csv_remove_column", json!({
+        "path": &path, "column": "Income",
+    })).await;
+    assert_eq!(val["removedColumn"], "Income");
+
+    // 10. csv_remove_row
+    let val = csv_dispatch_ok(&config, "csv_remove_row", json!({
+        "path": &path, "row": 0,
+    })).await;
+    assert_eq!(val["removedRowIndex"], 0);
+
+    // Unknown CSV tool rejected at dispatch
+    let err = csv_dispatch_err(&config, "csv_nonexistent_tool", json!({})).await;
+    assert!(err.contains("not found"), "Unknown tool should be rejected: {err}");
+
+    // Write tool blocked in readonly mode at dispatch
+    let mut ro_config = test_config();
+    ro_config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
+    let err = csv_dispatch_err(&ro_config, "csv_create", json!({
+        "path": &path, "headers": ["X"],
+    })).await;
+    assert!(err.contains("not allowed in read-only mode"), "Write CSV in readonly should be rejected: {err}");
 }
 
 // ────────────────────────────
