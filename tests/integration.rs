@@ -969,6 +969,58 @@ async fn test_readonly_mode_allows_tools_list() {
     assert!(res.is_ok(), "tools/list should always succeed");
 }
 
+#[tokio::test]
+async fn test_csv_via_full_dispatch() {
+    let config = test_config();
+    let path = t("dispatch.csv");
+
+    // Create CSV through JSON-RPC dispatch
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "csv_create",
+            "arguments": {
+                "path": &path,
+                "headers": ["A", "B"],
+                "rows": [["1", "2"], ["3", "4"]]
+            }
+        })),
+        id: Some(json!(100)),
+    };
+    let res = process_request(&req, &config).await;
+    assert!(res.is_ok(), "csv_create via dispatch failed: {:?}", res.err());
+
+    // Read CSV through JSON-RPC dispatch
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "csv_read",
+            "arguments": { "path": &path }
+        })),
+        id: Some(json!(101)),
+    };
+    let res = process_request(&req, &config).await;
+    assert!(res.is_ok(), "csv_read via dispatch failed: {:?}", res.err());
+    let val = res.unwrap();
+    assert_eq!(val["totalRows"], 2);
+    assert_eq!(val["rows"][0][0], "1");
+
+    // Unknown tool name should be rejected at dispatch level
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "csv_nonexistent_tool",
+            "arguments": {}
+        })),
+        id: Some(json!(102)),
+    };
+    let res = process_request(&req, &config).await;
+    assert!(res.is_err(), "Unknown CSV tool should be rejected at dispatch");
+}
+
 // ────────────────────────────
 //  Security Regression Tests
 // ────────────────────────────
