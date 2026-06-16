@@ -47,6 +47,7 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
     ToolMeta { name: "csv_rename_column",           write: true,  idempotent: false, destructive: false },
     ToolMeta { name: "csv_read_column_values_range", write: false, idempotent: true,  destructive: false },
     ToolMeta { name: "csv_read_row_range",           write: false, idempotent: true,  destructive: false },
+    ToolMeta { name: "csv_select_column_range",      write: false, idempotent: true,  destructive: false },
 ];
 
 #[inline]

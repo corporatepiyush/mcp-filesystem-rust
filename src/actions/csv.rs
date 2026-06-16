@@ -365,6 +365,57 @@ pub async fn csv_read_row_range(args: Option<&Value>, config: &Config) -> Result
     }))
 }
 
+// ── Tool: csv_select_column_range ────────────────────────
+// Like SELECT col1, col2 FROM table (no WHERE). Returns only
+// the requested columns for a row range, reducing data transfer.
+
+pub async fn csv_select_column_range(args: Option<&Value>, config: &Config) -> Result<Value> {
+    let path = get_str_arg(args, "path")?;
+    let valid_path = config.sandbox().resolve_path(&path)?;
+    let columns = get_str_array(args, "columns")?;
+    let start = get_opt_u64(args, "start").unwrap_or(0) as usize;
+    let end = get_opt_u64(args, "end").map(|e| e as usize);
+
+    if columns.is_empty() {
+        return Err(MCSError::InvalidParams("'columns' must be a non-empty array".into()));
+    }
+
+    if let Some(end) = end {
+        if end < start {
+            return Err(MCSError::InvalidParams(format!("end ({end}) must be >= start ({start})")));
+        }
+        if end - start > 100 {
+            return Err(MCSError::InvalidParams(format!(
+                "Range too large: {end} - {start} = {} exceeds maximum of 100 rows", end - start
+            )));
+        }
+    }
+
+    let data = read_csv_file(&valid_path).await?;
+
+    let col_indices: Vec<usize> = columns.iter()
+        .map(|c| find_column(&data, c))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let rows: Vec<Vec<&str>> = data.rows.iter()
+        .skip(start)
+        .take(end.map(|e| e.saturating_sub(start)).unwrap_or(usize::MAX))
+        .map(|row| col_indices.iter().map(|&i| row.get(i).map(|s| s.as_str()).unwrap_or("")).collect())
+        .collect();
+
+    let actual_end = start + rows.len();
+
+    Ok(json!({
+        "success": true,
+        "path": valid_path.to_string_lossy(),
+        "columns": columns,
+        "rows": rows,
+        "start": start,
+        "end": actual_end,
+        "totalRows": data.rows.len(),
+    }))
+}
+
 // ── Internal Data ────────────────────────────────────────
 
 struct CsvData {

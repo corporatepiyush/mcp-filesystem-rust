@@ -1052,7 +1052,24 @@ async fn test_csv_all_tools_via_dispatch() {
     })).await;
     assert_eq!(val["removedColumn"], "Income");
 
-    // 10. csv_remove_row
+    // 10. csv_select_column_range (SQL SELECT-like)
+    let val = csv_dispatch_ok(&config, "csv_select_column_range", json!({
+        "path": &path, "columns": ["Name", "City"],
+    })).await;
+    assert_eq!(val["columns"], json!(["Name", "City"]));
+    assert_eq!(val["rows"][0], json!(["Alice", "NYC"]));
+    assert_eq!(val["rows"][1], json!(["Bob", "SF"]));
+    assert_eq!(val["rows"][2], json!(["Carol", "LA"]));
+    assert_eq!(val["totalRows"], 3);
+
+    // csv_select_column_range with range
+    let val = csv_dispatch_ok(&config, "csv_select_column_range", json!({
+        "path": &path, "columns": ["Name"], "start": 1, "end": 3,
+    })).await;
+    assert_eq!(val["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(val["rows"][0], json!(["Bob"]));
+
+    // 11. csv_remove_row
     let val = csv_dispatch_ok(&config, "csv_remove_row", json!({
         "path": &path, "row": 0,
     })).await;
@@ -1069,6 +1086,286 @@ async fn test_csv_all_tools_via_dispatch() {
         "path": &path, "headers": ["X"],
     })).await;
     assert!(err.contains("not allowed in read-only mode"), "Write CSV in readonly should be rejected: {err}");
+}
+
+// ──────────────────────────────────────────
+//  Full Dispatch Tests (all tools through tools/call)
+// ──────────────────────────────────────────
+
+async fn dispatch_call(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> std::result::Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        method: "tools/call".into(),
+        params: Some(json!({ "name": name, "arguments": args })),
+        id: Some(json!(1)),
+    };
+    process_request(&req, config).await
+}
+
+async fn dispatch_ok(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> serde_json::Value {
+    dispatch_call(config, name, args).await.unwrap_or_else(|e| panic!("{name} via dispatch failed: {e}"))
+}
+
+async fn dispatch_err(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> String {
+    dispatch_call(config, name, args).await.unwrap_err().to_string()
+}
+
+#[tokio::test]
+async fn test_all_file_tools_via_dispatch() {
+    let config = test_config();
+    let dir = test_dir().join("dispatch_file_tools");
+    fs::create_dir_all(&dir).unwrap();
+    let d = |p: &str| dir.join(p).to_string_lossy().to_string();
+    let p = |p: &str| dir.join(p);
+
+    // Setup: create source files
+    fs::write(p("hello.txt"), "Hello, World!\nLine 2\nLine 3").unwrap();
+
+    // 1. read_text_file
+    let val = dispatch_ok(&config, "read_text_file", json!({ "path": d("hello.txt") })).await;
+    assert_eq!(val["content"], "Hello, World!\nLine 2\nLine 3");
+    assert_eq!(val["totalLines"], 3);
+
+    // 2. read_text_file with head
+    let val = dispatch_ok(&config, "read_text_file", json!({ "path": d("hello.txt"), "head": 2 })).await;
+    assert_eq!(val["content"], "Hello, World!\nLine 2");
+
+    // 3. read_text_file with tail
+    let val = dispatch_ok(&config, "read_text_file", json!({ "path": d("hello.txt"), "tail": 1 })).await;
+    assert_eq!(val["content"], "Line 3");
+
+    // 4. read_media_file (binary format)
+    let val = dispatch_ok(&config, "read_media_file", json!({ "path": d("hello.txt") })).await;
+    assert!(val["mimeType"].as_str().unwrap().contains("text/") || val["mimeType"].as_str().unwrap() == "inode/x-empty" || !val["mimeType"].as_str().unwrap().is_empty());
+
+    // 5. write_file
+    dispatch_ok(&config, "write_file", json!({
+        "path": d("written.txt"), "content": "written content",
+    })).await;
+    assert!(p("written.txt").exists());
+
+    // 6. edit_file
+    dispatch_ok(&config, "edit_file", json!({
+        "path": d("hello.txt"),
+        "edits": [{"oldText": "World", "newText": "Rust"}],
+    })).await;
+    let content = fs::read_to_string(p("hello.txt")).unwrap();
+    assert!(content.contains("Hello, Rust!"));
+
+    // 7. create_directory
+    dispatch_ok(&config, "create_directory", json!({ "path": d("new_dir") })).await;
+    assert!(p("new_dir").is_dir());
+
+    // 8. list_directory
+    let val = dispatch_ok(&config, "list_directory", json!({ "path": d("") })).await;
+    let entries = val["entries"].as_array().unwrap();
+    assert!(entries.iter().any(|e| e.as_str().unwrap().contains("hello.txt")));
+
+    // 9. list_directory_with_sizes
+    let val = dispatch_ok(&config, "list_directory_with_sizes", json!({ "path": d("") })).await;
+    assert!(val["summary"]["totalFiles"].as_u64().unwrap() > 0);
+
+    // 10. move_file
+    fs::write(p("move_src.txt"), "move me").unwrap();
+    dispatch_ok(&config, "move_file", json!({
+        "source": d("move_src.txt"), "destination": d("move_dst.txt"),
+    })).await;
+    assert!(!p("move_src.txt").exists());
+    assert!(p("move_dst.txt").exists());
+
+    // 11. copy_file
+    dispatch_ok(&config, "copy_file", json!({
+        "source": d("move_dst.txt"), "destination": d("copy_dst.txt"),
+    })).await;
+    assert!(p("copy_dst.txt").exists());
+
+    // 12. delete_file
+    dispatch_ok(&config, "delete_file", json!({ "path": d("copy_dst.txt") })).await;
+    assert!(!p("copy_dst.txt").exists());
+
+    // 13. delete_directory (recursive)
+    fs::create_dir_all(p("del_dir/sub")).unwrap();
+    fs::write(p("del_dir/sub/f.txt"), "x").unwrap();
+    dispatch_ok(&config, "delete_directory", json!({ "path": d("del_dir"), "recursive": true })).await;
+    assert!(!p("del_dir").exists());
+
+    // 14. search_files
+    let val = dispatch_ok(&config, "search_files", json!({
+        "path": d(""), "pattern": "*.txt",
+    })).await;
+    assert!(val["count"].as_u64().unwrap() > 0);
+
+    // 15. directory_tree
+    let val = dispatch_ok(&config, "directory_tree", json!({ "path": d("") })).await;
+    assert_eq!(val["type"], "directory");
+
+    // 16. get_file_info
+    let val = dispatch_ok(&config, "get_file_info", json!({ "path": d("hello.txt") })).await;
+    assert_eq!(val["type"], "file");
+    assert!(val["size"].as_u64().unwrap() > 0);
+
+    // 17. list_allowed_directories
+    let val = dispatch_ok(&config, "list_allowed_directories", json!({})).await;
+    assert!(!val["directories"].as_array().unwrap().is_empty());
+
+    // 18. hash_file
+    let val = dispatch_ok(&config, "hash_file", json!({
+        "path": d("hello.txt"), "algorithm": "sha256",
+    })).await;
+    assert_eq!(val["hash"].as_str().unwrap().len(), 64);
+
+    // 19. grep_files
+    let val = dispatch_ok(&config, "grep_files", json!({
+        "path": d(""), "pattern": "Rust",
+    })).await;
+    assert!(val["count"].as_u64().unwrap() > 0);
+
+    // 20. set_permissions
+    #[cfg(unix)]
+    {
+        dispatch_ok(&config, "set_permissions", json!({
+            "path": d("hello.txt"), "mode": "644",
+        })).await;
+    }
+
+    // 21. get_disk_usage
+    let val = dispatch_ok(&config, "get_disk_usage", json!({ "path": d("") })).await;
+    assert!(val["fileCount"].as_u64().unwrap() > 0);
+
+    // 22. create_symlink
+    #[cfg(unix)]
+    {
+        dispatch_ok(&config, "create_symlink", json!({
+            "source": d("hello.txt"), "linkPath": d("my_link.txt"),
+        })).await;
+    }
+
+    // 23. read_file_range
+    let val = dispatch_ok(&config, "read_file_range", json!({
+        "path": d("hello.txt"), "offset": 7, "length": 4,
+    })).await;
+    assert_eq!(val["content"], "Rust");
+
+    // 24. compress_gzip
+    let val = dispatch_ok(&config, "compress_gzip", json!({ "path": d("hello.txt") })).await;
+    assert!(val["compressedSize"].as_u64().unwrap() > 0);
+
+    // 25. decompress_gzip
+    let val = dispatch_ok(&config, "decompress_gzip", json!({ "path": d("hello.txt.gz") })).await;
+    assert!(val["decompressedSize"].as_u64().unwrap() > 0);
+
+    // 26. compress_zstd
+    dispatch_ok(&config, "compress_zstd", json!({ "path": d("hello.txt") })).await;
+    assert!(p("hello.txt.zst").exists());
+
+    // 27. decompress_zstd
+    let val = dispatch_ok(&config, "decompress_zstd", json!({ "path": d("hello.txt.zst") })).await;
+    assert!(val["decompressedSize"].as_u64().unwrap() > 0);
+
+    // 28. compress_tar + 29. decompress_tar
+    fs::write(p("new_dir/afile.txt"), "content").unwrap();
+    let tar_out = p("archive.tar.gz");
+    dispatch_ok(&config, "compress_tar", json!({
+        "source": d("new_dir"), "output": d("archive.tar.gz"), "compression": "gzip",
+    })).await;
+    assert!(tar_out.exists());
+    let extract_out = p("extracted");
+    let val = dispatch_ok(&config, "decompress_tar", json!({
+        "path": &tar_out, "outputDir": &extract_out,
+    })).await;
+    assert!(val["extracted"].as_u64().unwrap() > 0);
+
+    // Unknown tool rejected
+    let err = dispatch_err(&config, "nonexistent_tool", json!({})).await;
+    assert!(err.contains("not found"));
+
+    // Write tool blocked in readonly
+    let mut ro_config = test_config();
+    ro_config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
+    let err = dispatch_err(&ro_config, "write_file", json!({
+        "path": d("nope.txt"), "content": "x",
+    })).await;
+    assert!(err.contains("not allowed in read-only mode"));
+}
+
+#[tokio::test]
+async fn test_all_crypto_tools_via_dispatch() {
+    let config = test_config();
+    let dir = test_dir().join("dispatch_crypto");
+    fs::create_dir_all(&dir).unwrap();
+    let d = |p: &str| dir.join(p).to_string_lossy().to_string();
+    let p = |p: &str| dir.join(p);
+
+    // Setup plaintext file
+    fs::write(p("plain.txt"), "This is secret data!").unwrap();
+
+    // 1. generate_key (AES)
+    let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "aes-256" })).await;
+    let aes_key = val["key"].as_str().unwrap().to_string();
+    assert_eq!(aes_key.len(), 64);
+
+    // 2. encrypt_file (AES-256-GCM)
+    let val = dispatch_ok(&config, "encrypt_file", json!({
+        "path": d("plain.txt"),
+        "algorithm": "aes-256-gcm",
+        "key": &aes_key,
+    })).await;
+    assert!(p("plain.txt.enc").exists());
+    assert_eq!(val["algorithm"], "aes-256-gcm");
+
+    // 3. decrypt_file (AES-256-GCM)
+    let val = dispatch_ok(&config, "decrypt_file", json!({
+        "path": d("plain.txt.enc"),
+        "key": &aes_key,
+    })).await;
+    assert_eq!(val["algorithm"], "aes-256-gcm");
+
+    let decrypted = fs::read_to_string(p("plain.txt")).unwrap();
+    assert_eq!(decrypted, "This is secret data!");
+
+    // 4. generate_key (RSA)
+    let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "rsa-2048" })).await;
+    let pub_key = val["publicKey"].as_str().unwrap().to_string();
+    let priv_key = val["privateKey"].as_str().unwrap().to_string();
+
+    // 5. encrypt_file (RSA)
+    fs::write(p("rsa_plain.txt"), "RSA secret!").unwrap();
+    dispatch_ok(&config, "encrypt_file", json!({
+        "path": d("rsa_plain.txt"),
+        "algorithm": "rsa-2048-oaep",
+        "publicKey": &pub_key,
+    })).await;
+    assert!(p("rsa_plain.txt.enc").exists());
+
+    // 6. decrypt_file (RSA)
+    dispatch_ok(&config, "decrypt_file", json!({
+        "path": d("rsa_plain.txt.enc"),
+        "privateKey": &priv_key,
+    })).await;
+    let decrypted = fs::read_to_string(p("rsa_plain.txt")).unwrap();
+    assert_eq!(decrypted, "RSA secret!");
+
+    // 7. ChaCha20 roundtrip via dispatch
+    let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "aes-256" })).await;
+    let chacha_key = val["key"].as_str().unwrap().to_string();
+    fs::write(p("chacha_plain.txt"), "ChaCha secret!").unwrap();
+    dispatch_ok(&config, "encrypt_file", json!({
+        "path": d("chacha_plain.txt"),
+        "algorithm": "chacha20-poly1305",
+        "key": &chacha_key,
+    })).await;
+    dispatch_ok(&config, "decrypt_file", json!({
+        "path": d("chacha_plain.txt.enc"),
+        "key": &chacha_key,
+    })).await;
+    assert_eq!(fs::read_to_string(p("chacha_plain.txt")).unwrap(), "ChaCha secret!");
+
+    // generate_key with key file output
+    dispatch_ok(&config, "generate_key", json!({
+        "algorithm": "aes-256",
+        "output": d("saved.key"),
+    })).await;
+    assert!(p("saved.key").exists());
 }
 
 // ────────────────────────────

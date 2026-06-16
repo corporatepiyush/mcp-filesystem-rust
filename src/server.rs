@@ -387,6 +387,7 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         "csv_rename_column" => actions::csv::csv_rename_column(tool_args, config).await,
         "csv_read_column_values_range" => actions::csv::csv_read_column_values_range(tool_args, config).await,
         "csv_read_row_range" => actions::csv::csv_read_row_range(tool_args, config).await,
+        "csv_select_column_range" => actions::csv::csv_select_column_range(tool_args, config).await,
         tool => Err(method_not_found(tool)),
     };
 
