@@ -559,5 +559,20 @@
       "required": ["path"]
     },
     "annotations": { "readOnlyHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "csv_select_column_range",
+    "description": "Select specific columns from a CSV file — like SQL SELECT col1, col2 FROM table (no WHERE clause). Returns only the requested columns for a row range, reducing data transfer when you need a subset of fields. Use columns to specify which column names to include. Optionally set start and end to limit the row range (max 100 rows). Returns the selected values as a 2D array aligned with the requested column order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Path to the existing CSV file." },
+        "columns": { "type": "array", "items": { "type": "string" }, "description": "Column names to select, in the desired order. Must be non-empty and all column names must exist in the CSV header." },
+        "start": { "type": "number", "description": "Starting row index (0-based, inclusive). Defaults to 0 (first data row). Row 0 is the first data row after the header." },
+        "end": { "type": "number", "description": "Ending row index (0-based, exclusive). Rows from start up to (but not including) end are returned. Defaults to all rows if omitted. Maximum range window (end - start) is 100 rows." }
+      },
+      "required": ["path", "columns"]
+    },
+    "annotations": { "readOnlyHint": true, "idempotentHint": true }
   }
 ]
