@@ -68,7 +68,7 @@ pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
     let offset = get_opt_u64(args, "offset").unwrap_or(0);
     let filter_cols: Option<Vec<String>> = get_opt_str_array(args, "columns");
 
-    let data = read_csv_file(&valid_path).await?;
+    let data = read_csv_file(&valid_path, config.max_file_size).await?;
     let total_rows = data.rows.len();
 
     if let Some(ref cols) = filter_cols {
@@ -113,7 +113,7 @@ pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
 pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let added = add_rows_from_args(&mut data, args)?;
     let total_rows = data.rows.len();
@@ -132,7 +132,7 @@ pub async fn csv_add_row(args: Option<&Value>, config: &Config) -> Result<Value>
 pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let row_idx = get_opt_u64(args, "row")
         .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))? as usize;
@@ -171,7 +171,7 @@ pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Va
 pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let row_idx = get_opt_u64(args, "row")
         .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))? as usize;
@@ -200,7 +200,7 @@ pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Val
 pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let column = get_str_arg(args, "column")?;
     if data.column_map.contains_key(&column) {
@@ -232,7 +232,7 @@ pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Val
 pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let col_idx = resolve_column(&data, args)?;
     let col_name = data.headers.remove(col_idx);
@@ -258,7 +258,7 @@ pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<
 pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let mut data = read_csv_file(&valid_path).await?;
+    let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let old_name = get_str_arg(args, "oldName")?;
     let new_name = get_str_arg(args, "newName")?;
@@ -303,7 +303,7 @@ pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config)
         }
     }
 
-    let data = read_csv_file(&valid_path).await?;
+    let data = read_csv_file(&valid_path, config.max_file_size).await?;
     let col_idx = find_column(&data, &column)?;
 
     let values: Vec<&str> = data.rows.iter()
@@ -344,7 +344,7 @@ pub async fn csv_read_row_range(args: Option<&Value>, config: &Config) -> Result
         }
     }
 
-    let data = read_csv_file(&valid_path).await?;
+    let data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let rows: Vec<Vec<String>> = data.rows.iter()
         .skip(start)
@@ -391,7 +391,7 @@ pub async fn csv_select_column_range(args: Option<&Value>, config: &Config) -> R
         }
     }
 
-    let data = read_csv_file(&valid_path).await?;
+    let data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let col_indices: Vec<usize> = columns.iter()
         .map(|c| find_column(&data, c))
@@ -427,12 +427,15 @@ struct CsvData {
 /// Files below this size are read with a plain `read`; larger ones are mapped.
 const CSV_MMAP_THRESHOLD: u64 = 256 * 1024;
 
-async fn read_csv_file(path: &Path) -> Result<CsvData> {
+async fn read_csv_file(path: &Path, max_file_size: u64) -> Result<CsvData> {
     let path_buf = path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<CsvData, String> {
         let file = std::fs::File::open(&path_buf)
             .map_err(|e| format!("Cannot open CSV: {e}"))?;
         let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+        if file_size > max_file_size {
+            return Err(format!("CSV file size {file_size} exceeds maximum allowed size {max_file_size}"));
+        }
         if file_size < CSV_MMAP_THRESHOLD {
             let bytes = std::fs::read(&path_buf)
                 .map_err(|e| format!("Cannot read CSV: {e}"))?;

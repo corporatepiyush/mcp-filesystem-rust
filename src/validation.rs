@@ -465,21 +465,6 @@ impl Sandbox {
         )))?
     }
 
-    /// Check if a path exists within the sandbox.
-    pub fn exists(&self, path: &str) -> bool {
-        to_abs(path).exists()
-    }
-
-    /// Check if a path is a file within the sandbox.
-    pub fn is_file(&self, path: &str) -> bool {
-        to_abs(path).is_file()
-    }
-
-    /// Check if a path is a directory within the sandbox.
-    pub fn is_dir(&self, path: &str) -> bool {
-        to_abs(path).is_dir()
-    }
-
     /// Create a symlink (Unix only, within sandbox).
     pub async fn create_symlink(&self, src: &str, link: &str) -> Result<()> {
         let src_abs = canonicalize_or_parent(&normalize_path(&to_abs(src)))?;

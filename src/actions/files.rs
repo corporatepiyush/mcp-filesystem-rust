@@ -1,9 +1,15 @@
 use serde_json::{Value, json};
+use async_compression::tokio::bufread::GzipDecoder as AsyncGzipDecoder;
+use async_compression::tokio::bufread::ZstdDecoder as AsyncZstdDecoder;
+
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256, Sha512};
 use std::io::{BufRead, Read, Seek};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::AsyncWrite;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -22,8 +28,8 @@ const MMAP_THRESHOLD: u64 = 256 * 1024;
 
 pub async fn read_text_file(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
-    let head = get_opt_i64(args, "head").map(|v| v.min(100_000));
-    let tail = get_opt_i64(args, "tail").map(|v| v.min(100_000));
+    let head = get_opt_i64(args, "head").map(|v| v.clamp(0, 100_000));
+    let tail = get_opt_i64(args, "tail").map(|v| v.clamp(0, 100_000));
 
     if head.is_some() && tail.is_some() {
         return Err(MCSError::InvalidParams("Cannot specify both head and tail simultaneously".into()));
@@ -432,11 +438,15 @@ pub async fn search_files(args: Option<&Value>, config: &Config) -> Result<Value
 
     let results = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<String>, String> {
         let mut res = Vec::new();
+        const SEARCH_LIMIT: usize = 100_000;
         let walker = WalkDir::new(&root)
             .follow_links(follow)
             .into_iter()
             .filter_entry(|e| !is_hidden(e));
         for entry in walker.filter_map(|e| e.ok()) {
+            if res.len() >= SEARCH_LIMIT {
+                break;
+            }
             let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
             let relative_str = relative.to_string_lossy();
             if exclude_globs.iter().any(|g| g.is_match(relative_str.as_ref())) {
@@ -527,22 +537,19 @@ pub async fn hash_file(args: Option<&Value>, config: &Config) -> Result<Value> {
         return Err(MCSError::InvalidParams(format!("Path is not a file: {path}")));
     }
 
-    let cap_meta = config.sandbox().metadata(&path).await?;
-    if cap_meta.len() > config.max_file_size {
-        return Err(MCSError::FilesystemError(format!(
-            "File size {size} exceeds maximum allowed size {max}",
-            size = cap_meta.len(),
-            max = config.max_file_size
-        )));
-    }
-
+    let max_size = config.max_file_size;
     let path_clone = valid_path.clone();
     let alg = algorithm.clone();
-    let hash = tokio::task::spawn_blocking(move || -> std::result::Result<String, String> {
+    let (hash, _file_size) = tokio::task::spawn_blocking(move || -> std::result::Result<(String, u64), String> {
+        let meta = std::fs::metadata(&path_clone)
+            .map_err(|e| format!("Cannot get metadata: {e}"))?;
+        let size = meta.len();
+        if size > max_size {
+            return Err(format!("File size {size} exceeds maximum allowed size {max_size}"));
+        }
         let file = std::fs::File::open(&path_clone)
             .map_err(|e| format!("Cannot open file for hashing: {e}"))?;
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if size < MMAP_THRESHOLD {
+        let result = if size < MMAP_THRESHOLD {
             let data = std::fs::read(&path_clone)
                 .map_err(|e| format!("Cannot read file for hashing: {e}"))?;
             hash_bytes(&alg, &data)
@@ -552,7 +559,8 @@ pub async fn hash_file(args: Option<&Value>, config: &Config) -> Result<Value> {
                     .map_err(|e| format!("Cannot mmap file: {e}"))?
             };
             hash_bytes(&alg, &mmap)
-        }
+        }?;
+        Ok((result, size))
     }).await.map_err(|e| MCSError::FilesystemError(format!("Hash task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
@@ -583,6 +591,7 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
 
     let results = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<Value>, String> {
         let mut res = Vec::new();
+        const GREP_LIMIT: usize = 100_000;
 
         let walker = WalkDir::new(&root)
             .follow_links(follow)
@@ -590,6 +599,9 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
             .filter_entry(|e| !is_hidden(e));
 
         for entry in walker.filter_map(|e| e.ok()) {
+            if res.len() >= GREP_LIMIT {
+                break;
+            }
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -618,6 +630,9 @@ pub async fn grep_files(args: Option<&Value>, config: &Config) -> Result<Value> 
 
             for (idx, line) in reader.lines().enumerate() {
                 let Ok(line) = line else { break };
+                if res.len() >= GREP_LIMIT {
+                    break;
+                }
                 if re.is_match(&line) {
                     res.push(json!({
                         "file": entry.path().to_string_lossy(),
@@ -721,39 +736,36 @@ pub async fn read_file_range(args: Option<&Value>, config: &Config) -> Result<Va
     }
 
     let valid_path = config.sandbox().resolve_path(&path)?;
-    let cap_meta = config.sandbox().metadata(&path).await?;
 
-    let file_size = cap_meta.len() as i64;
-    if offset >= file_size {
-        return Err(MCSError::InvalidParams(format!("Offset {offset} exceeds file size {file_size}")));
-    }
-
-    let actual_length = (offset + length).min(file_size) - offset;
-    if actual_length > config.max_file_size as i64 {
-        return Err(MCSError::FilesystemError(format!(
-            "Requested range {actual_length} exceeds maximum allowed size {max}",
-            max = config.max_file_size
-        )));
-    }
-
+    let max_size = config.max_file_size;
     let path_clone = valid_path.clone();
-    let content = tokio::task::spawn_blocking(move || -> std::result::Result<String, String> {
+    let content = tokio::task::spawn_blocking(move || -> std::result::Result<(String, i64), String> {
+        let meta = std::fs::metadata(&path_clone)
+            .map_err(|e| format!("Cannot get file metadata: {e}"))?;
+        let file_size = meta.len() as i64;
+        if offset >= file_size {
+            return Err(format!("Offset {offset} exceeds file size {file_size}"));
+        }
+        let actual = (offset as u64).saturating_add(length as u64).min(file_size as u64).saturating_sub(offset as u64);
+        if actual > max_size {
+            return Err(format!("Requested range {actual} exceeds maximum allowed size {max_size}"));
+        }
         let mut file = std::fs::File::open(&path_clone)
             .map_err(|e| format!("Cannot open file: {e}"))?;
         file.seek(std::io::SeekFrom::Start(offset as u64))
             .map_err(|e| format!("Cannot seek: {e}"))?;
-        let mut buf = Vec::with_capacity(actual_length as usize);
-        file.take(actual_length as u64)
+        let mut buf = Vec::with_capacity(actual as usize);
+        file.take(actual)
             .read_to_end(&mut buf)
             .map_err(|e| format!("Cannot read range: {e}"))?;
-        Ok(String::from_utf8_lossy(&buf).into_owned())
+        Ok((String::from_utf8_lossy(&buf).into_owned(), actual as i64))
     }).await.map_err(|e| MCSError::FilesystemError(format!("read_file_range task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
     Ok(json!({
-        "content": content,
+        "content": content.0,
         "offset": offset,
-        "length": actual_length,
+        "length": content.1,
         "path": valid_path.to_string_lossy(),
     }))
 }
@@ -771,11 +783,12 @@ pub async fn compress_gzip(args: Option<&Value>, config: &Config) -> Result<Valu
         return Err(MCSError::InvalidParams("Output path must differ from source".into()));
     }
 
-    let original_size = config.sandbox().metadata(&path).await?.len();
-
     let src = valid_path.clone();
     let dst = output_path.clone();
-    let compressed_size = tokio::task::spawn_blocking(move || -> std::result::Result<u64, String> {
+    let (original_size, compressed_size) = tokio::task::spawn_blocking(move || -> std::result::Result<(u64, u64), String> {
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| format!("Cannot get source metadata: {e}"))?;
+        let original_size = meta.len();
         let mut input = std::fs::File::open(&src)
             .map_err(|e| format!("Cannot open file: {e}"))?;
         let output = std::fs::File::create(&dst)
@@ -787,7 +800,7 @@ pub async fn compress_gzip(args: Option<&Value>, config: &Config) -> Result<Valu
             .map_err(|e| format!("gzip compression finalize failed: {e}"))?;
         let size = output_file.metadata()
             .map_err(|e| format!("Cannot get output metadata: {e}"))?.len();
-        Ok(size)
+        Ok((original_size, size))
     }).await.map_err(|e| MCSError::FilesystemError(format!("Compression task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
@@ -805,6 +818,45 @@ pub async fn compress_gzip(args: Option<&Value>, config: &Config) -> Result<Valu
     }))
 }
 
+/// Async writer with a byte limit — decompression bomb protection.
+struct AsyncLimitedWriter<W: AsyncWrite + Unpin> {
+    inner: W,
+    written: u64,
+    limit: u64,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncLimitedWriter<W> {
+    const fn new(inner: W, limit: u64) -> Self {
+        Self { inner, written: 0, limit }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncLimitedWriter<W> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        let new_total = self.written.saturating_add(buf.len() as u64);
+        if new_total > self.limit {
+            return Poll::Ready(Err(std::io::Error::other(format!(
+                "Decompressed output exceeds maximum allowed size of {} bytes",
+                self.limit
+            ))));
+        }
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(count)) => {
+                self.written += count as u64;
+                Poll::Ready(Ok(count))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 pub async fn decompress_gzip(args: Option<&Value>, config: &Config) -> Result<Value> {
     let path = get_str_arg(args, "path")?;
     let output = get_opt_str(args, "output");
@@ -819,20 +871,18 @@ pub async fn decompress_gzip(args: Option<&Value>, config: &Config) -> Result<Va
     let src = valid_path.clone();
     let dst = output_path.clone();
     let max_out = config.max_decompressed_size;
-    let decompressed_size = tokio::task::spawn_blocking(move || -> std::result::Result<u64, String> {
-        let input = std::fs::File::open(&src)
-            .map_err(|e| format!("Cannot open compressed file: {e}"))?;
-        let mut decoder = GzDecoder::new(input);
-        let output = std::fs::File::create(&dst)
-            .map_err(|e| format!("Cannot create output file: {e}"))?;
-        let mut writer = LimitedWriter::new(std::io::BufWriter::new(output), max_out);
-        std::io::copy(&mut decoder, &mut writer)
-            .map_err(|e| format!("gzip decompression failed: {e}"))?;
-        std::io::Write::flush(&mut writer)
-            .map_err(|e| format!("Cannot flush output: {e}"))?;
-        Ok(writer.written())
-    }).await.map_err(|e| MCSError::FilesystemError(format!("Decompression task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+
+    let reader = tokio::io::BufReader::new(
+        tokio::fs::File::open(&src).await
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot open compressed file: {e}")))?,
+    );
+    let mut decoder = AsyncGzipDecoder::new(reader);
+    let output = tokio::fs::File::create(&dst).await
+        .map_err(|e| MCSError::FilesystemError(format!("Cannot create output file: {e}")))?;
+    let mut writer = AsyncLimitedWriter::new(tokio::io::BufWriter::new(output), max_out);
+    tokio::io::copy(&mut decoder, &mut writer).await
+        .map_err(|e| MCSError::FilesystemError(format!("gzip decompression failed: {e}")))?;
+    let decompressed_size = writer.written;
 
     Ok(json!({
         "success": true,
@@ -856,16 +906,18 @@ pub async fn compress_zstd(args: Option<&Value>, config: &Config) -> Result<Valu
         return Err(MCSError::InvalidParams("Output path must differ from source".into()));
     }
 
-    let original_size = config.sandbox().metadata(&path).await?.len();
-
     let src = valid_path.clone();
     let dst = output_path.clone();
-    let compressed_size = tokio::task::spawn_blocking(move || -> std::result::Result<u64, String> {
+    let lvl = level;
+    let (original_size, compressed_size) = tokio::task::spawn_blocking(move || -> std::result::Result<(u64, u64), String> {
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| format!("Cannot get source metadata: {e}"))?;
+        let original_size = meta.len();
         let mut input = std::fs::File::open(&src)
             .map_err(|e| format!("Cannot open file: {e}"))?;
         let output = std::fs::File::create(&dst)
             .map_err(|e| format!("Cannot create output file: {e}"))?;
-        let mut encoder = zstd::stream::Encoder::new(output, level)
+        let mut encoder = zstd::stream::Encoder::new(output, lvl)
             .map_err(|e| format!("Cannot create zstd encoder: {e}"))?;
         std::io::copy(&mut input, &mut encoder)
             .map_err(|e| format!("zstd compression failed: {e}"))?;
@@ -873,7 +925,7 @@ pub async fn compress_zstd(args: Option<&Value>, config: &Config) -> Result<Valu
             .map_err(|e| format!("zstd compression finalize failed: {e}"))?;
         let size = output_file.metadata()
             .map_err(|e| format!("Cannot get output metadata: {e}"))?.len();
-        Ok(size)
+        Ok((original_size, size))
     }).await.map_err(|e| MCSError::FilesystemError(format!("Compression task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
 
@@ -938,21 +990,18 @@ pub async fn decompress_zstd(args: Option<&Value>, config: &Config) -> Result<Va
     let src = valid_path.clone();
     let dst = output_path.clone();
     let max_out = config.max_decompressed_size;
-    let decompressed_size = tokio::task::spawn_blocking(move || -> std::result::Result<u64, String> {
-        let input = std::fs::File::open(&src)
-            .map_err(|e| format!("Cannot open compressed file: {e}"))?;
-        let mut decoder = zstd::stream::Decoder::new(input)
-            .map_err(|e| format!("Cannot create zstd decoder: {e}"))?;
-        let output = std::fs::File::create(&dst)
-            .map_err(|e| format!("Cannot create output file: {e}"))?;
-        let mut writer = LimitedWriter::new(std::io::BufWriter::new(output), max_out);
-        std::io::copy(&mut decoder, &mut writer)
-            .map_err(|e| format!("zstd decompression failed: {e}"))?;
-        std::io::Write::flush(&mut writer)
-            .map_err(|e| format!("Cannot flush output: {e}"))?;
-        Ok(writer.written())
-    }).await.map_err(|e| MCSError::FilesystemError(format!("Decompression task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+
+    let reader = tokio::io::BufReader::new(
+        tokio::fs::File::open(&src).await
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot open compressed file: {e}")))?,
+    );
+    let mut decoder = AsyncZstdDecoder::new(reader);
+    let output = tokio::fs::File::create(&dst).await
+        .map_err(|e| MCSError::FilesystemError(format!("Cannot create output file: {e}")))?;
+    let mut writer = AsyncLimitedWriter::new(tokio::io::BufWriter::new(output), max_out);
+    tokio::io::copy(&mut decoder, &mut writer).await
+        .map_err(|e| MCSError::FilesystemError(format!("zstd decompression failed: {e}")))?;
+    let decompressed_size = writer.written;
 
     Ok(json!({
         "success": true,
@@ -975,12 +1024,12 @@ pub async fn compress_tar(args: Option<&Value>, config: &Config) -> Result<Value
         return Err(MCSError::InvalidParams("Output path must not be inside the source directory".into()));
     }
 
-    let entries = collect_tar_entries(&valid_source, config)?;
-
     let source_clone = valid_source.clone();
     let output_clone = output_path.clone();
     let comp_clone = compression.clone();
+    let follow = config.server.follow_symlinks;
     let result = tokio::task::spawn_blocking(move || {
+        let entries = collect_tar_entries(&source_clone, follow)?;
         create_tar_archive(&source_clone, &output_clone, &entries, &comp_clone)
     }).await.map_err(|e| MCSError::FilesystemError(format!("Tar task failed: {e}")))?
       .map_err(MCSError::FilesystemError)?;
@@ -1019,42 +1068,6 @@ pub async fn decompress_tar(args: Option<&Value>, config: &Config) -> Result<Val
     }))
 }
 
-/// A writer that errors once more than `limit` bytes have been written.
-/// Used to bound decompression output and defend against decompression bombs.
-struct LimitedWriter<W> {
-    inner: W,
-    written: u64,
-    limit: u64,
-}
-
-impl<W: std::io::Write> LimitedWriter<W> {
-    const fn new(inner: W, limit: u64) -> Self {
-        Self { inner, written: 0, limit }
-    }
-
-    const fn written(&self) -> u64 {
-        self.written
-    }
-}
-
-impl<W: std::io::Write> std::io::Write for LimitedWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.written.saturating_add(buf.len() as u64) > self.limit {
-            return Err(std::io::Error::other(format!(
-                "Decompressed output exceeds maximum allowed size of {} bytes",
-                self.limit
-            )));
-        }
-        let n = self.inner.write(buf)?;
-        self.written += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 struct TarResult {
     entries: u64,
     total_size: u64,
@@ -1065,11 +1078,11 @@ struct ExtractResult {
     total_size: u64,
 }
 
-fn collect_tar_entries(source: &std::path::Path, config: &Config) -> Result<Vec<PathBuf>> {
+fn collect_tar_entries(source: &std::path::Path, follow_symlinks: bool) -> std::result::Result<Vec<PathBuf>, String> {
     let mut entries = Vec::new();
     if source.is_dir() {
         let walker = WalkDir::new(source)
-            .follow_links(config.server.follow_symlinks)
+            .follow_links(follow_symlinks)
             .into_iter()
             .filter_entry(|e| !is_hidden(e));
         for entry in walker.filter_map(|e| e.ok()) {

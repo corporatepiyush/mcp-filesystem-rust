@@ -62,10 +62,46 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
 
     let dst = output_path.clone();
 
+    // Validate keyFile path through sandbox before spawn_blocking
+    let resolved_key_bytes = if let Some(ref kf) = key_file_opt {
+        let validated_kf = config.sandbox().resolve_path(kf)?;
+        let content = std::fs::read_to_string(&validated_kf)
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot read key file: {e}")))?;
+        let trimmed = content.trim().to_string();
+        let bytes = hex::decode(&trimmed)
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid key hex in file: {e}")))?;
+        if bytes.len() != SYMMETRIC_KEY_SIZE {
+            return Err(MCSError::InvalidParams(
+                format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes")
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<EncryptResult, String> {
         match algo_id {
             ALGO_AES256GCM | ALGO_CHACHA20 => {
-                let key = resolve_symmetric_key_extracted(key_opt, key_file_opt, generate)?;
+                let key = match (key_opt, resolved_key_bytes, generate) {
+                    (Some(k), _, _) => {
+                        let bytes = hex::decode(&k)
+                            .map_err(|e| format!("Invalid key hex: {e}"))?;
+                        if bytes.len() != SYMMETRIC_KEY_SIZE {
+                            return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
+                        }
+                        bytes
+                    }
+                    (_, Some(bytes), _) => bytes,
+                    (None, None, true) => {
+                        let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
+                        OsRng.fill_bytes(&mut key);
+                        key
+                    }
+                    (None, None, false) => {
+                        return Err("No key provided. Use 'key', 'keyFile', or 'generateKey: true'".into());
+                    }
+                };
                 let key_hex = Zeroizing::new(hex::encode(&*key));
                 let (header, ciphertext) = symmetric_encrypt(&file_data, &key_hex, algo_id)?;
                 write_encrypted(&dst, &header, &ciphertext)?;
@@ -127,10 +163,39 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         return Err(MCSError::InvalidParams("Output must differ from source".into()));
     }
 
+    // Validate keyFile path through sandbox before spawn_blocking
+    let resolved_key_bytes = if let Some(ref kf) = key_file_opt {
+        let validated_kf = config.sandbox().resolve_path(kf)?;
+        let content = std::fs::read_to_string(&validated_kf)
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot read key file: {e}")))?;
+        let trimmed = content.trim().to_string();
+        let bytes = hex::decode(&trimmed)
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid key hex in file: {e}")))?;
+        if bytes.len() != SYMMETRIC_KEY_SIZE {
+            return Err(MCSError::InvalidParams(
+                format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes")
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<u8>, String> {
         match algo_id {
             ALGO_AES256GCM | ALGO_CHACHA20 => {
-                let key = resolve_symmetric_key_extracted(key_opt, key_file_opt, false)?;
+                let key = match (key_opt, resolved_key_bytes) {
+                    (Some(k), _) => {
+                        let bytes = hex::decode(&k)
+                            .map_err(|e| format!("Invalid key hex: {e}"))?;
+                        if bytes.len() != SYMMETRIC_KEY_SIZE {
+                            return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
+                        }
+                        bytes
+                    }
+                    (_, Some(bytes)) => bytes,
+                    (None, None) => return Err("No key provided. Use 'key' or 'keyFile'".into()),
+                };
                 let key_hex = hex::encode(&key);
                 symmetric_decrypt(&body, &key_hex, &nonce, algo_id)
             }
@@ -169,12 +234,16 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
     let algorithm = get_opt_str(args, "algorithm").unwrap_or_else(|| "aes-256".to_string());
     let output = get_opt_str(args, "output");
 
-    if let Some(ref out) = output {
-        config.sandbox().resolve_destination_path(out)?;
-    }
+    // Validate output path through sandbox and use canonical path
+    let validated_output = if let Some(ref out) = output {
+        let canonical = config.sandbox().resolve_destination_path(out)?;
+        Some(canonical)
+    } else {
+        None
+    };
 
     let alg_clone = algorithm.clone();
-    let out_clone = output.clone();
+    let out_clone = validated_output.clone();
 
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<KeygenResult, String> {
         match alg_clone.as_str() {
@@ -199,7 +268,8 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
                 let pub_pem = pub_key.to_public_key_pem(LineEnding::LF)
                     .map_err(|e| format!("PEM encoding failed: {e}"))?;
                 if let Some(ref out) = out_clone {
-                    std::fs::write(format!("{out}.pub"), &pub_pem)
+                    let pub_path = out.with_extension("pub");
+                    std::fs::write(&pub_path, &pub_pem)
                         .map_err(|e| format!("Cannot write public key: {e}"))?;
                     std::fs::write(out, &priv_pem)
                         .map_err(|e| format!("Cannot write private key: {e}"))?;
@@ -217,9 +287,10 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
                      hex::encode(pk.as_bytes()), hex::encode(sk.as_bytes()))
                 };
                 if let Some(ref out) = out_clone {
+                    let pub_path = out.with_extension("pub");
                     std::fs::write(out, &sk_hex)
                         .map_err(|e| format!("Cannot write secret key: {e}"))?;
-                    std::fs::write(format!("{out}.pub"), &pk_hex)
+                    std::fs::write(&pub_path, &pk_hex)
                         .map_err(|e| format!("Cannot write public key: {e}"))?;
                 }
                 Ok(KeygenResult { key: None, public_key: Some(pk_hex), private_key: Some(sk_hex) })
@@ -233,12 +304,13 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
     if let Some(k) = result.key { resp["key"] = json!(k); }
     if let Some(pk) = result.public_key { resp["publicKey"] = json!(pk); }
     if let Some(sk) = result.private_key { resp["privateKey"] = json!(sk); }
-    if let Some(ref out) = output {
+    if let Some(ref out) = validated_output {
         if algorithm == "aes-256" {
-            resp["keyFile"] = json!(out);
+            resp["keyFile"] = json!(out.to_string_lossy().to_string());
         } else {
-            resp["privateKeyFile"] = json!(out);
-            resp["publicKeyFile"] = json!(format!("{out}.pub"));
+            let pub_path = out.with_extension("pub");
+            resp["privateKeyFile"] = json!(out.to_string_lossy().to_string());
+            resp["publicKeyFile"] = json!(pub_path.to_string_lossy().to_string());
         }
     }
     Ok(resp)
@@ -491,38 +563,6 @@ fn write_encrypted(path: &std::path::Path, header: &[u8], ciphertext: &[u8]) -> 
         .map_err(|e| format!("Cannot write ciphertext: {e}"))?;
     file.flush().map_err(|e| format!("Cannot flush: {e}"))?;
     Ok(())
-}
-
-// ── Key Resolution ───────────────────────────────────────
-
-fn resolve_symmetric_key_extracted(
-    key_opt: Option<String>,
-    key_file_opt: Option<String>,
-    generate: bool,
-) -> std::result::Result<Vec<u8>, String> {
-    if let Some(k) = key_opt {
-        let bytes = hex::decode(&k).map_err(|e| format!("Invalid key hex: {e}"))?;
-        if bytes.len() != SYMMETRIC_KEY_SIZE {
-            return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
-        }
-        return Ok(bytes);
-    }
-    if let Some(kf) = key_file_opt {
-        let content = std::fs::read_to_string(&kf)
-            .map_err(|e| format!("Cannot read key file: {e}"))?;
-        let trimmed = content.trim().to_string();
-        let bytes = hex::decode(&trimmed).map_err(|e| format!("Invalid key hex in file: {e}"))?;
-        if bytes.len() != SYMMETRIC_KEY_SIZE {
-            return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
-        }
-        return Ok(bytes);
-    }
-    if generate {
-        let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
-        OsRng.fill_bytes(&mut key);
-        return Ok(key);
-    }
-    Err("No key provided. Use 'key', 'keyFile', or 'generateKey: true'".into())
 }
 
 // ── Algorithm Helpers ────────────────────────────────────

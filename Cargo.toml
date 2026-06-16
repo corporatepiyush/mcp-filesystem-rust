@@ -1,6 +1,6 @@
 [package]
 name = "mcp-filesystem"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 authors = ["Piyush"]
 description = "High-performance MCP server for filesystem access with parallel async I/O, glob search, media detection, and secure path sandboxing"
@@ -46,6 +46,7 @@ md-5 = "0.10"
 # Compression
 flate2 = "1.0"
 zstd = "0.13"
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 tar = "0.4"
 
 # CSV
