@@ -379,38 +379,53 @@ async fn test_chacha20_encrypt_decrypt_roundtrip() {
     assert_eq!(decrypted, "ChaCha secret!");
 }
 
-#[tokio::test]
-async fn test_rsa_encrypt_decrypt_roundtrip() {
+async fn mlkem_roundtrip(keygen_algo: &str, encrypt_algo: &str, file: &str, plaintext: &str) {
     let config = test_config();
-    fs::write(t("rsa_secret.txt"), "RSA secret!").unwrap();
+    fs::write(t(file), plaintext).unwrap();
 
-    // Generate RSA key
-    let args = json!({ "algorithm": "rsa-2048" });
+    // Generate ML-KEM keypair (public/secret hex, FIPS 203 encodings)
+    let args = json!({ "algorithm": keygen_algo });
     let res = mcp_filesystem::actions::crypto::generate_key(Some(&args), &config).await;
-    assert!(res.is_ok(), "RSA keygen failed: {:?}", res.err());
+    assert!(res.is_ok(), "{keygen_algo} keygen failed: {:?}", res.err());
     let val = res.unwrap();
     let pub_key = val["publicKey"].as_str().unwrap().to_string();
     let priv_key = val["privateKey"].as_str().unwrap().to_string();
 
-    // Encrypt with public key
+    // Encapsulate + encrypt with the public key
     let args = json!({
-        "path": t("rsa_secret.txt"),
-        "algorithm": "rsa-2048-oaep",
+        "path": t(file),
+        "algorithm": encrypt_algo,
         "publicKey": &pub_key,
     });
     let res = mcp_filesystem::actions::crypto::encrypt_file(Some(&args), &config).await;
-    assert!(res.is_ok(), "RSA encrypt_file failed: {:?}", res.err());
+    assert!(res.is_ok(), "{encrypt_algo} encrypt_file failed: {:?}", res.err());
 
-    // Decrypt with private key
+    // Decapsulate + decrypt with the secret key
     let args = json!({
-        "path": t("rsa_secret.txt.enc"),
+        "path": t(&format!("{file}.enc")),
         "privateKey": &priv_key,
     });
     let res = mcp_filesystem::actions::crypto::decrypt_file(Some(&args), &config).await;
-    assert!(res.is_ok(), "RSA decrypt_file failed: {:?}", res.err());
+    assert!(res.is_ok(), "{encrypt_algo} decrypt_file failed: {:?}", res.err());
 
-    let decrypted = fs::read_to_string(t("rsa_secret.txt")).unwrap();
-    assert_eq!(decrypted, "RSA secret!");
+    let decrypted = fs::read_to_string(t(file)).unwrap();
+    assert_eq!(decrypted, plaintext);
+}
+
+#[tokio::test]
+async fn test_mlkem768_encrypt_decrypt_roundtrip() {
+    mlkem_roundtrip("mlkem-768", "mlkem-768", "mlkem768_secret.txt", "ML-KEM-768 secret!").await;
+}
+
+#[tokio::test]
+async fn test_mlkem1024_encrypt_decrypt_roundtrip() {
+    mlkem_roundtrip(
+        "mlkem-1024",
+        "mlkem-1024",
+        "mlkem1024_secret.txt",
+        "ML-KEM-1024 secret!",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -983,14 +998,15 @@ async fn test_generate_key_aes() {
 }
 
 #[tokio::test]
-async fn test_generate_key_rsa() {
+async fn test_generate_key_mlkem() {
     let config = test_config();
-    let args = json!({ "algorithm": "rsa-2048" });
+    let args = json!({ "algorithm": "mlkem-768" });
     let res = mcp_filesystem::actions::crypto::generate_key(Some(&args), &config).await;
-    assert!(res.is_ok(), "generate_key RSA failed: {:?}", res.err());
+    assert!(res.is_ok(), "generate_key ML-KEM failed: {:?}", res.err());
     let val = res.unwrap();
-    assert!(val["publicKey"].as_str().unwrap().contains("BEGIN"));
-    assert!(val["privateKey"].as_str().unwrap().contains("BEGIN"));
+    // ML-KEM-768: 1184-byte public key, 2400-byte expanded secret key (hex-encoded)
+    assert_eq!(val["publicKey"].as_str().unwrap().len(), 1184 * 2);
+    assert_eq!(val["privateKey"].as_str().unwrap().len(), 2400 * 2);
 }
 
 // ────────────────────────────
@@ -1681,37 +1697,37 @@ async fn test_all_crypto_tools_via_dispatch() {
     let decrypted = fs::read_to_string(p("plain.txt")).unwrap();
     assert_eq!(decrypted, "This is secret data!");
 
-    // 4. generate_key (RSA)
-    let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "rsa-2048" })).await;
+    // 4. generate_key (ML-KEM)
+    let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "mlkem-768" })).await;
     let pub_key = val["publicKey"].as_str().unwrap().to_string();
     let priv_key = val["privateKey"].as_str().unwrap().to_string();
 
-    // 5. encrypt_file (RSA)
-    fs::write(p("rsa_plain.txt"), "RSA secret!").unwrap();
+    // 5. encrypt_file (ML-KEM)
+    fs::write(p("mlkem_plain.txt"), "ML-KEM secret!").unwrap();
     dispatch_ok(
         &config,
         "encrypt_file",
         json!({
-            "path": d("rsa_plain.txt"),
-            "algorithm": "rsa-2048-oaep",
+            "path": d("mlkem_plain.txt"),
+            "algorithm": "mlkem-768",
             "publicKey": &pub_key,
         }),
     )
     .await;
-    assert!(p("rsa_plain.txt.enc").exists());
+    assert!(p("mlkem_plain.txt.enc").exists());
 
-    // 6. decrypt_file (RSA)
+    // 6. decrypt_file (ML-KEM)
     dispatch_ok(
         &config,
         "decrypt_file",
         json!({
-            "path": d("rsa_plain.txt.enc"),
+            "path": d("mlkem_plain.txt.enc"),
             "privateKey": &priv_key,
         }),
     )
     .await;
-    let decrypted = fs::read_to_string(p("rsa_plain.txt")).unwrap();
-    assert_eq!(decrypted, "RSA secret!");
+    let decrypted = fs::read_to_string(p("mlkem_plain.txt")).unwrap();
+    assert_eq!(decrypted, "ML-KEM secret!");
 
     // 7. ChaCha20 roundtrip via dispatch
     let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "aes-256" })).await;

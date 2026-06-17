@@ -31,7 +31,7 @@ src/
     ├── mod.rs           # Re-exports action modules
     ├── files.rs         # Core file ops (read/write/edit/move/copy/delete/grep/search/tail/head/archive/hash)
     ├── csv.rs           # CSV operations (create/read/update/add/remove rows & columns)
-    └── crypto.rs        # Encryption/decryption (AES-256-GCM, ChaCha20-Poly1305, RSA-OAEP, ML-KEM)
+    └── crypto.rs        # Encryption/decryption (AES-256-GCM, ChaCha20-Poly1305, ML-KEM)
 tests/
 └── integration.rs       # 41 integration tests
 ```
@@ -44,7 +44,7 @@ tests/
 |---|---|---|
 | Async runtime | `tokio` (full) | Industry standard |
 | HTTP/2 + SSE | `axum` + `hyper` | Modern async HTTP |
-| Encryption | `aes-gcm`, `chacha20poly1305`, `rsa`, `pqcrypto-mlkem`, `pqcrypto-traits` | Standard + post-quantum KEM |
+| Encryption | `aes-gcm`, `chacha20poly1305`, `ml-kem` | Symmetric AEAD + pure-Rust post-quantum KEM (FIPS 203) |
 | Hashing | `sha2`, `blake3`, `md-5` | Standard hashing |
 | Zero-copy I/O | `memmap2` | DMA-like memory-mapped file reads (sendfile-style) |
 | CSV | `csv` | De facto standard |
@@ -61,6 +61,8 @@ tests/
 | Old | New | Reason |
 |---|---|---|
 | `pqcrypto-kyber` | `pqcrypto-mlkem` | RUSTSEC-2024-0381, Kyber → ML-KEM standard |
+| `pqcrypto-mlkem`, `pqcrypto-traits` | `ml-kem` | RUSTSEC-2026-0161/0162/0163 (PQClean archived/unmaintained); pure Rust, no C/FFI build dep, FIPS 203 wire-compatible |
+| `rsa` (RSA-OAEP) | — (removed) | Deprecated by CNSA 2.0 / NIST IR 8547 for 2026; only source of RUSTSEC-2023-0071 (Marvin, no fix). PQ KEM (ML-KEM) is the replacement. Hybrid X-Wing pending stable crate |
 | `once_cell` | `std::sync::LazyLock` | Stabilized in std (edition 2024) |
 | `mime_guess` | `infer` | Unmaintained, infer uses magic bytes |
 

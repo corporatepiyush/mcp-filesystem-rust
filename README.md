@@ -18,7 +18,7 @@ It exposes a rich set of filesystem tools — reads, writes, edits, search, hash
   - **Search**: glob `search_files` and content `grep_files`.
   - **Hashing**: SHA-256, SHA-512, BLAKE3, MD5.
   - **Compression**: gzip, zstd, and tar archives.
-  - **Encryption**: AES-256-GCM, ChaCha20-Poly1305, RSA-OAEP, and post-quantum ML-KEM; plus key generation.
+  - **Encryption**: AES-256-GCM, ChaCha20-Poly1305, and post-quantum ML-KEM-768/1024 (NIST FIPS 203); plus key generation.
   - **CSV**: create/read and row/column/cell manipulation with ranged reads.
 - **Media detection** via content inspection and magic-byte sniffing.
 
@@ -99,7 +99,7 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 - **Path sandboxing**: every path is canonicalized and checked against the allow-list. Symlink components are rejected unless `--follow-symlinks` is set; write destinations whose final component is a symlink are also rejected.
 - **Network exposure**: the default bind is loopback (`127.0.0.1`). Binding to a non-loopback host without `--auth-token` logs a prominent warning — the allow-listed directories would otherwise be reachable, unauthenticated, over the network.
 - **Resource limits**: request lines are size-capped (`--max-request-bytes`), requests are time-bounded (`--request-timeout`), decompression output is capped (`--max-decompressed-size`), and concurrent connections are bounded (`--max-connections`).
-- **Known advisory**: the `rsa` crate is subject to the Marvin timing side-channel ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). Because encryption here is local (no remote timing oracle) the practical risk is low; it is acknowledged in [`audit.toml`](audit.toml). Prefer AES-GCM, ChaCha20-Poly1305, or ML-KEM.
+- **Cryptography posture (June 2026)**: the supported algorithms are deliberately limited to AES-256-GCM, ChaCha20-Poly1305, and post-quantum ML-KEM-768/1024 (FIPS 203). RSA-OAEP was removed — it is being deprecated by [CNSA 2.0](https://www.nsa.gov/Cybersecurity/Post-Quantum-Cryptography/) and [NIST IR 8547](https://csrc.nist.gov/pubs/ir/8547/ipd) and was the project's only source of an unfixable advisory (the `rsa` Marvin timing side-channel, [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). `cargo audit` is clean with no acknowledged advisories. A hybrid `X25519 + ML-KEM-768` (X-Wing) mode is planned once a stable, audited Rust implementation is available — the current `x-wing` crate is still a pre-release.
 
 ## Development
 

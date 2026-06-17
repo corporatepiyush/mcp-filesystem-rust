@@ -363,15 +363,15 @@
   },
   {
     "name": "encrypt_file",
-    "description": "Encrypt a file using the specified algorithm. Supports symmetric (aes-256-gcm, chacha20-poly1305), asymmetric hybrid (rsa-2048-oaep, rsa-4096-oaep), and quantum-proof KEM (kyber-768, kyber-1024) encryption. For symmetric algorithms, provide a hex-encoded 32-byte key via 'key' or use 'generateKey: true' to have one created and returned. For asymmetric/KEM, provide the public key via 'publicKey'. The encrypted file uses the MCPE format with self-describing header, AEAD authentication, and AAD binding of header fields. Original file data is encrypted with AES-256-GCM (or ChaCha20-Poly1305) using a random nonce and 16-byte authentication tag. Returns the output path and, if generated, the encryption key.",
+    "description": "Encrypt a file using the specified algorithm. Supports symmetric AEAD (aes-256-gcm, chacha20-poly1305) and post-quantum KEM (mlkem-768, mlkem-1024 — NIST FIPS 203 ML-KEM) encryption. For symmetric algorithms, provide a hex-encoded 32-byte key via 'key' or use 'generateKey: true' to have one created and returned. For the KEM algorithms, provide the recipient's hex-encoded public key via 'publicKey'. The encrypted file uses the MCPE format with self-describing header, AEAD authentication, and AAD binding of header fields. Original file data is encrypted with AES-256-GCM (or ChaCha20-Poly1305) using a random nonce and 16-byte authentication tag. Returns the output path and, if generated, the encryption key.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "path": { "type": "string", "description": "Path to the file to encrypt." },
-        "algorithm": { "type": "string", "enum": ["aes-256-gcm", "chacha20-poly1305", "rsa-2048-oaep", "rsa-4096-oaep", "kyber-768", "kyber-1024"], "description": "Encryption algorithm. 'aes-256-gcm' (default) — standard symmetric. 'chacha20-poly1305' — fast symmetric. 'rsa-2048-oaep' / 'rsa-4096-oaep' — hybrid asymmetric (encrypts random key with RSA-OAEP). 'kyber-768' / 'kyber-1024' — quantum-proof KEM (NIST standard)." },
+        "algorithm": { "type": "string", "enum": ["aes-256-gcm", "chacha20-poly1305", "mlkem-768", "mlkem-1024"], "description": "Encryption algorithm. 'aes-256-gcm' (default) — standard symmetric AEAD. 'chacha20-poly1305' — fast symmetric AEAD. 'mlkem-768' / 'mlkem-1024' — post-quantum KEM (NIST FIPS 203 ML-KEM); 768 for general use, 1024 for CNSA 2.0 / high-assurance. The legacy aliases 'kyber-768' / 'kyber-1024' are still accepted." },
         "key": { "type": "string", "description": "Hex-encoded 32-byte symmetric key (for aes-256-gcm, chacha20-poly1305). Mutually exclusive with publicKey and keyFile." },
-        "publicKey": { "type": "string", "description": "Public key for asymmetric/KEM algorithms. PEM format for RSA, hex-encoded for Kyber." },
-        "keyFile": { "type": "string", "description": "Path to a file containing the key (hex for symmetric, PEM for RSA, hex for Kyber)." },
+        "publicKey": { "type": "string", "description": "Hex-encoded ML-KEM public (encapsulation) key, as produced by generate_key. Required for mlkem-768 / mlkem-1024." },
+        "keyFile": { "type": "string", "description": "Path to a file containing a hex-encoded 32-byte symmetric key." },
         "generateKey": { "type": "boolean", "description": "Generate a random 32-byte symmetric key and return it in the response (symmetric algorithms only). Default: false." },
         "output": { "type": "string", "description": "Output path for the encrypted file. Defaults to input path with .enc appended." }
       },
@@ -381,14 +381,14 @@
   },
   {
     "name": "decrypt_file",
-    "description": "Decrypt a file that was encrypted with encrypt_file. The algorithm is auto-detected from the MCPE file header. Provide the corresponding key: hex-encoded 32-byte symmetric key via 'key' for symmetric algorithms, PEM private key via 'privateKey' for RSA, or hex-encoded secret key via 'privateKey' for Kyber. AEAD authentication verification detects wrong keys or corrupted data and returns an error. Returns the decrypted file path and size.",
+    "description": "Decrypt a file that was encrypted with encrypt_file. The algorithm is auto-detected from the MCPE file header. Provide the corresponding key: hex-encoded 32-byte symmetric key via 'key' for symmetric algorithms, or the hex-encoded ML-KEM secret (decapsulation) key via 'privateKey' for mlkem-768 / mlkem-1024. AEAD authentication verification detects wrong keys or corrupted data and returns an error. Returns the decrypted file path and size.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "path": { "type": "string", "description": "Path to the .enc file to decrypt." },
         "key": { "type": "string", "description": "Hex-encoded 32-byte symmetric key (for aes-256-gcm, chacha20-poly1305 algorithms)." },
-        "privateKey": { "type": "string", "description": "Private key for asymmetric/KEM algorithms. PEM format for RSA, hex-encoded for Kyber." },
-        "keyFile": { "type": "string", "description": "Path to a file containing the key (hex for symmetric, PEM for RSA, hex for Kyber)." },
+        "privateKey": { "type": "string", "description": "Hex-encoded ML-KEM secret (decapsulation) key, as produced by generate_key. Required for mlkem-768 / mlkem-1024." },
+        "keyFile": { "type": "string", "description": "Path to a file containing a hex-encoded 32-byte symmetric key." },
         "output": { "type": "string", "description": "Output path for the decrypted file. Defaults to input path with .enc removed." }
       },
       "required": ["path"]
@@ -397,12 +397,12 @@
   },
   {
     "name": "generate_key",
-    "description": "Generate cryptographic keys for use with encrypt_file and decrypt_file. Supports: 'aes-256' — random 32-byte hex key. 'rsa-2048' / 'rsa-4096' — RSA keypair in PEM (PKCS#8) format. 'kyber-768' / 'kyber-1024' — Kyber KEM keypair as hex-encoded bytes. Keys can be written to files via 'output', and are always returned in the response. For RSA and Kyber, the secret key is written to 'output' and the public key to 'output.pub'.",
+    "description": "Generate cryptographic keys for use with encrypt_file and decrypt_file. Supports: 'aes-256' — random 32-byte hex key. 'mlkem-768' / 'mlkem-1024' — post-quantum ML-KEM (NIST FIPS 203) keypair as hex-encoded bytes (public/encapsulation key + secret/decapsulation key). Keys can be written to files via 'output', and are always returned in the response. For ML-KEM, the secret key is written to 'output' and the public key to 'output.pub'.",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "algorithm": { "type": "string", "enum": ["aes-256", "rsa-2048", "rsa-4096", "kyber-768", "kyber-1024"], "description": "Key type to generate. 'aes-256' — symmetric 32-byte key (hex). 'rsa-2048' / 'rsa-4096' — RSA keypair (PEM). 'kyber-768' / 'kyber-1024' — quantum-proof Kyber keypair (hex). Default: 'aes-256'." },
-        "output": { "type": "string", "description": "Optional path to write the key file. For RSA/Kyber, the secret key is written here and the public key to {output}.pub." }
+        "algorithm": { "type": "string", "enum": ["aes-256", "mlkem-768", "mlkem-1024"], "description": "Key type to generate. 'aes-256' — symmetric 32-byte key (hex). 'mlkem-768' / 'mlkem-1024' — post-quantum ML-KEM keypair (hex); 768 for general use, 1024 for CNSA 2.0 / high-assurance. The legacy aliases 'kyber-768' / 'kyber-1024' are still accepted. Default: 'aes-256'." },
+        "output": { "type": "string", "description": "Optional path to write the key file. For ML-KEM, the secret key is written here and the public key to {output}.pub." }
       },
       "required": []
     },
