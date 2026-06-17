@@ -32,7 +32,9 @@ impl FromStr for AccessMode {
         match s.to_lowercase().as_str() {
             "unrestricted" => Ok(AccessMode::Unrestricted),
             "readonly" | "read-only" => Ok(AccessMode::ReadOnly),
-            _ => Err(format!("Invalid access mode: {s}. Use 'unrestricted' or 'readonly'")),
+            _ => Err(format!(
+                "Invalid access mode: {s}. Use 'unrestricted' or 'readonly'"
+            )),
         }
     }
 }
@@ -147,9 +149,7 @@ impl Config {
     /// Access the capability-backed sandbox, lazily initialised on first call.
     pub fn sandbox(&self) -> &Arc<Sandbox> {
         self.sandbox.get_or_init(|| {
-            Arc::new(
-                Sandbox::new(self).expect("failed to initialise capability sandbox"),
-            )
+            Arc::new(Sandbox::new(self).expect("failed to initialise capability sandbox"))
         })
     }
 
@@ -200,9 +200,18 @@ mod tests {
 
     #[test]
     fn test_access_mode_parse() {
-        assert_eq!("unrestricted".parse::<AccessMode>().unwrap(), AccessMode::Unrestricted);
-        assert_eq!("readonly".parse::<AccessMode>().unwrap(), AccessMode::ReadOnly);
-        assert_eq!("read-only".parse::<AccessMode>().unwrap(), AccessMode::ReadOnly);
+        assert_eq!(
+            "unrestricted".parse::<AccessMode>().unwrap(),
+            AccessMode::Unrestricted
+        );
+        assert_eq!(
+            "readonly".parse::<AccessMode>().unwrap(),
+            AccessMode::ReadOnly
+        );
+        assert_eq!(
+            "read-only".parse::<AccessMode>().unwrap(),
+            AccessMode::ReadOnly
+        );
         assert!("invalid".parse::<AccessMode>().is_err());
     }
 }

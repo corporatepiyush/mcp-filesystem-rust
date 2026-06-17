@@ -16,20 +16,26 @@ pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> 
     if valid_path.exists() {
         let overwrite = get_opt_bool(args, "overwrite").unwrap_or(false);
         if !overwrite {
-            return Err(MCSError::FilesystemError(format!("File already exists: {path}. Set 'overwrite': true to replace.")));
+            return Err(MCSError::FilesystemError(format!(
+                "File already exists: {path}. Set 'overwrite': true to replace."
+            )));
         }
     }
 
     let headers: Vec<String> = get_str_array(args, "headers")?;
     if headers.is_empty() {
-        return Err(MCSError::InvalidParams("'headers' must be a non-empty array".into()));
+        return Err(MCSError::InvalidParams(
+            "'headers' must be a non-empty array".into(),
+        ));
     }
 
     let rows: Vec<Vec<String>> = get_opt_str_array_of_arrays(args, "rows").unwrap_or_default();
     for (i, row) in rows.iter().enumerate() {
         if row.len() != headers.len() {
             return Err(MCSError::InvalidParams(format!(
-                "Row {i} has {} values, expected {}", row.len(), headers.len()
+                "Row {i} has {} values, expected {}",
+                row.len(),
+                headers.len()
             )));
         }
     }
@@ -38,8 +44,8 @@ pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> 
     let hdrs = headers.clone();
     let rows_count = rows.len();
     tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
-        let mut wtr = csv::Writer::from_path(&dst)
-            .map_err(|e| format!("Cannot create CSV writer: {e}"))?;
+        let mut wtr =
+            csv::Writer::from_path(&dst).map_err(|e| format!("Cannot create CSV writer: {e}"))?;
         wtr.write_record(&hdrs)
             .map_err(|e| format!("Cannot write headers: {e}"))?;
         for row in &rows {
@@ -48,8 +54,10 @@ pub async fn csv_create(args: Option<&Value>, config: &Config) -> Result<Value> 
         }
         wtr.flush().map_err(|e| format!("Cannot flush: {e}"))?;
         Ok(())
-    }).await.map_err(|e| MCSError::FilesystemError(format!("CSV task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+    })
+    .await
+    .map_err(|e| MCSError::FilesystemError(format!("CSV task failed: {e}")))?
+    .map_err(MCSError::FilesystemError)?;
 
     Ok(json!({
         "success": true,
@@ -72,14 +80,21 @@ pub async fn csv_read(args: Option<&Value>, config: &Config) -> Result<Value> {
     let total_rows = data.rows.len();
 
     if let Some(ref cols) = filter_cols {
-        let col_indices: Vec<usize> = cols.iter()
+        let col_indices: Vec<usize> = cols
+            .iter()
             .map(|c| find_column(&data, c))
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let start = offset.min(total_rows as u64) as usize;
         let end = (offset.saturating_add(limit)).min(total_rows as u64) as usize;
-        let page: Vec<Vec<String>> = data.rows[start..end].iter()
-            .map(|row| col_indices.iter().map(|&i| row.get(i).cloned().unwrap_or_default()).collect())
+        let page: Vec<Vec<String>> = data.rows[start..end]
+            .iter()
+            .map(|row| {
+                col_indices
+                    .iter()
+                    .map(|&i| row.get(i).cloned().unwrap_or_default())
+                    .collect()
+            })
             .collect();
 
         Ok(json!({
@@ -135,14 +150,16 @@ pub async fn csv_update_cell(args: Option<&Value>, config: &Config) -> Result<Va
     let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let row_idx = get_opt_u64(args, "row")
-        .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))? as usize;
+        .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))?
+        as usize;
     let value = get_str_arg(args, "value")?;
     let col_idx = resolve_column(&data, args)?;
 
     if row_idx >= data.rows.len() {
         return Err(MCSError::InvalidParams(format!(
             "Row index {row_idx} out of range. File has {} data rows (0..{})",
-            data.rows.len(), data.rows.len().saturating_sub(1)
+            data.rows.len(),
+            data.rows.len().saturating_sub(1)
         )));
     }
 
@@ -174,12 +191,14 @@ pub async fn csv_remove_row(args: Option<&Value>, config: &Config) -> Result<Val
     let mut data = read_csv_file(&valid_path, config.max_file_size).await?;
 
     let row_idx = get_opt_u64(args, "row")
-        .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))? as usize;
+        .ok_or_else(|| MCSError::InvalidParams("Missing required: 'row'".into()))?
+        as usize;
 
     if row_idx >= data.rows.len() {
         return Err(MCSError::InvalidParams(format!(
             "Row index {row_idx} out of range. File has {} data rows (0..{})",
-            data.rows.len(), data.rows.len().saturating_sub(1)
+            data.rows.len(),
+            data.rows.len().saturating_sub(1)
         )));
     }
 
@@ -204,7 +223,9 @@ pub async fn csv_add_column(args: Option<&Value>, config: &Config) -> Result<Val
 
     let column = get_str_arg(args, "column")?;
     if data.column_map.contains_key(&column) {
-        return Err(MCSError::InvalidParams(format!("Column already exists: '{column}'")));
+        return Err(MCSError::InvalidParams(format!(
+            "Column already exists: '{column}'"
+        )));
     }
 
     let default_val = get_opt_str(args, "defaultValue").unwrap_or_default();
@@ -236,7 +257,12 @@ pub async fn csv_remove_column(args: Option<&Value>, config: &Config) -> Result<
 
     let col_idx = resolve_column(&data, args)?;
     let col_name = data.headers.remove(col_idx);
-    data.column_map = data.headers.iter().enumerate().map(|(i, h)| (h.clone(), i)).collect();
+    data.column_map = data
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
     for row in &mut data.rows {
         if col_idx < row.len() {
             row.remove(col_idx);
@@ -264,10 +290,14 @@ pub async fn csv_rename_column(args: Option<&Value>, config: &Config) -> Result<
     let new_name = get_str_arg(args, "newName")?;
 
     if !data.column_map.contains_key(&old_name) {
-        return Err(MCSError::InvalidParams(format!("Column not found: '{old_name}'")));
+        return Err(MCSError::InvalidParams(format!(
+            "Column not found: '{old_name}'"
+        )));
     }
     if data.column_map.contains_key(&new_name) && old_name != new_name {
-        return Err(MCSError::InvalidParams(format!("Target column name already exists: '{new_name}'")));
+        return Err(MCSError::InvalidParams(format!(
+            "Target column name already exists: '{new_name}'"
+        )));
     }
 
     let old_idx = data.column_map.remove(&old_name).unwrap();
@@ -294,11 +324,14 @@ pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config)
 
     if let Some(end) = end {
         if end < start {
-            return Err(MCSError::InvalidParams(format!("end ({end}) must be >= start ({start})")));
+            return Err(MCSError::InvalidParams(format!(
+                "end ({end}) must be >= start ({start})"
+            )));
         }
         if end - start > 1000 {
             return Err(MCSError::InvalidParams(format!(
-                "Range too large: {end} - {start} = {} exceeds maximum of 1000 rows", end - start
+                "Range too large: {end} - {start} = {} exceeds maximum of 1000 rows",
+                end - start
             )));
         }
     }
@@ -306,7 +339,9 @@ pub async fn csv_read_column_values_range(args: Option<&Value>, config: &Config)
     let data = read_csv_file(&valid_path, config.max_file_size).await?;
     let col_idx = find_column(&data, &column)?;
 
-    let values: Vec<&str> = data.rows.iter()
+    let values: Vec<&str> = data
+        .rows
+        .iter()
         .skip(start)
         .take(end.map(|e| e.saturating_sub(start)).unwrap_or(usize::MAX))
         .map(|row| row.get(col_idx).map(|s| s.as_str()).unwrap_or(""))
@@ -335,18 +370,23 @@ pub async fn csv_read_row_range(args: Option<&Value>, config: &Config) -> Result
 
     if let Some(end) = end {
         if end < start {
-            return Err(MCSError::InvalidParams(format!("end ({end}) must be >= start ({start})")));
+            return Err(MCSError::InvalidParams(format!(
+                "end ({end}) must be >= start ({start})"
+            )));
         }
         if end - start > 100 {
             return Err(MCSError::InvalidParams(format!(
-                "Range too large: {end} - {start} = {} exceeds maximum of 100 rows", end - start
+                "Range too large: {end} - {start} = {} exceeds maximum of 100 rows",
+                end - start
             )));
         }
     }
 
     let data = read_csv_file(&valid_path, config.max_file_size).await?;
 
-    let rows: Vec<Vec<String>> = data.rows.iter()
+    let rows: Vec<Vec<String>> = data
+        .rows
+        .iter()
         .skip(start)
         .take(end.map(|e| e.saturating_sub(start)).unwrap_or(1))
         .cloned()
@@ -377,30 +417,43 @@ pub async fn csv_select_column_range(args: Option<&Value>, config: &Config) -> R
     let end = get_opt_u64(args, "end").map(|e| e as usize);
 
     if columns.is_empty() {
-        return Err(MCSError::InvalidParams("'columns' must be a non-empty array".into()));
+        return Err(MCSError::InvalidParams(
+            "'columns' must be a non-empty array".into(),
+        ));
     }
 
     if let Some(end) = end {
         if end < start {
-            return Err(MCSError::InvalidParams(format!("end ({end}) must be >= start ({start})")));
+            return Err(MCSError::InvalidParams(format!(
+                "end ({end}) must be >= start ({start})"
+            )));
         }
         if end - start > 100 {
             return Err(MCSError::InvalidParams(format!(
-                "Range too large: {end} - {start} = {} exceeds maximum of 100 rows", end - start
+                "Range too large: {end} - {start} = {} exceeds maximum of 100 rows",
+                end - start
             )));
         }
     }
 
     let data = read_csv_file(&valid_path, config.max_file_size).await?;
 
-    let col_indices: Vec<usize> = columns.iter()
+    let col_indices: Vec<usize> = columns
+        .iter()
         .map(|c| find_column(&data, c))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    let rows: Vec<Vec<&str>> = data.rows.iter()
+    let rows: Vec<Vec<&str>> = data
+        .rows
+        .iter()
         .skip(start)
         .take(end.map(|e| e.saturating_sub(start)).unwrap_or(usize::MAX))
-        .map(|row| col_indices.iter().map(|&i| row.get(i).map(|s| s.as_str()).unwrap_or("")).collect())
+        .map(|row| {
+            col_indices
+                .iter()
+                .map(|&i| row.get(i).map(|s| s.as_str()).unwrap_or(""))
+                .collect()
+        })
         .collect();
 
     let actual_end = start + rows.len();
@@ -430,25 +483,24 @@ const CSV_MMAP_THRESHOLD: u64 = 256 * 1024;
 async fn read_csv_file(path: &Path, max_file_size: u64) -> Result<CsvData> {
     let path_buf = path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<CsvData, String> {
-        let file = std::fs::File::open(&path_buf)
-            .map_err(|e| format!("Cannot open CSV: {e}"))?;
+        let file = std::fs::File::open(&path_buf).map_err(|e| format!("Cannot open CSV: {e}"))?;
         let file_size = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
         if file_size > max_file_size {
-            return Err(format!("CSV file size {file_size} exceeds maximum allowed size {max_file_size}"));
+            return Err(format!(
+                "CSV file size {file_size} exceeds maximum allowed size {max_file_size}"
+            ));
         }
         if file_size < CSV_MMAP_THRESHOLD {
-            let bytes = std::fs::read(&path_buf)
-                .map_err(|e| format!("Cannot read CSV: {e}"))?;
+            let bytes = std::fs::read(&path_buf).map_err(|e| format!("Cannot read CSV: {e}"))?;
             parse_csv(&bytes, file_size)
         } else {
-            let mmap = unsafe {
-                Mmap::map(&file)
-                    .map_err(|e| format!("Cannot mmap CSV: {e}"))?
-            };
+            let mmap = unsafe { Mmap::map(&file).map_err(|e| format!("Cannot mmap CSV: {e}"))? };
             parse_csv(&mmap, file_size)
         }
-    }).await.map_err(|e| MCSError::FilesystemError(format!("CSV read task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+    })
+    .await
+    .map_err(|e| MCSError::FilesystemError(format!("CSV read task failed: {e}")))?
+    .map_err(MCSError::FilesystemError)?;
 
     Ok(result)
 }
@@ -459,13 +511,16 @@ fn parse_csv(data: &[u8], file_size: u64) -> std::result::Result<CsvData, String
         .flexible(true)
         .from_reader(data);
 
-    let headers: Vec<String> = rdr.headers()
+    let headers: Vec<String> = rdr
+        .headers()
         .map_err(|e| format!("Cannot read CSV headers: {e}"))?
         .iter()
         .map(|s| s.to_string())
         .collect();
 
-    let column_map: HashMap<String, usize> = headers.iter().enumerate()
+    let column_map: HashMap<String, usize> = headers
+        .iter()
+        .enumerate()
         .map(|(i, h)| (h.clone(), i))
         .collect();
 
@@ -481,7 +536,11 @@ fn parse_csv(data: &[u8], file_size: u64) -> std::result::Result<CsvData, String
         rows.push(row);
     }
 
-    Ok(CsvData { headers, column_map, rows })
+    Ok(CsvData {
+        headers,
+        column_map,
+        rows,
+    })
 }
 
 async fn write_csv_file(path: &Path, data: CsvData) -> Result<()> {
@@ -497,8 +556,10 @@ async fn write_csv_file(path: &Path, data: CsvData) -> Result<()> {
         }
         wtr.flush().map_err(|e| format!("Cannot flush: {e}"))?;
         Ok(())
-    }).await.map_err(|e| MCSError::FilesystemError(format!("CSV write task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+    })
+    .await
+    .map_err(|e| MCSError::FilesystemError(format!("CSV write task failed: {e}")))?
+    .map_err(MCSError::FilesystemError)?;
 
     Ok(())
 }
@@ -509,31 +570,42 @@ fn resolve_column(data: &CsvData, args: Option<&Value>) -> Result<usize> {
     } else if let Some(col_idx) = get_opt_u64(args, "columnIndex") {
         let idx = col_idx as usize;
         if idx >= data.headers.len() {
-            Err(MCSError::InvalidParams(format!("Column index {idx} out of range (0..{})", data.headers.len())))
+            Err(MCSError::InvalidParams(format!(
+                "Column index {idx} out of range (0..{})",
+                data.headers.len()
+            )))
         } else {
             Ok(idx)
         }
     } else {
-        Err(MCSError::InvalidParams("Missing required: specify 'column' (name) or 'columnIndex' (number)".into()))
+        Err(MCSError::InvalidParams(
+            "Missing required: specify 'column' (name) or 'columnIndex' (number)".into(),
+        ))
     }
 }
 
 fn find_column(data: &CsvData, name: &str) -> Result<usize> {
-    data.column_map.get(name).copied()
-        .ok_or_else(|| MCSError::InvalidParams(
-            format!("Column not found: '{name}'. Available: {}", data.headers.join(", "))
+    data.column_map.get(name).copied().ok_or_else(|| {
+        MCSError::InvalidParams(format!(
+            "Column not found: '{name}'. Available: {}",
+            data.headers.join(", ")
         ))
+    })
 }
 
 fn add_rows_from_args(data: &mut CsvData, args: Option<&Value>) -> Result<usize> {
-    let rows_val = args.and_then(|a| a.get("rows"))
+    let rows_val = args
+        .and_then(|a| a.get("rows"))
         .ok_or_else(|| MCSError::InvalidParams("Missing required: 'rows'".into()))?;
 
-    let rows_arr = rows_val.as_array()
+    let rows_arr = rows_val
+        .as_array()
         .ok_or_else(|| MCSError::InvalidParams("'rows' must be an array".into()))?;
 
     if rows_arr.is_empty() {
-        return Err(MCSError::InvalidParams("'rows' must be a non-empty array".into()));
+        return Err(MCSError::InvalidParams(
+            "'rows' must be a non-empty array".into(),
+        ));
     }
 
     let mut count = 0;
@@ -551,12 +623,16 @@ fn add_rows_from_args(data: &mut CsvData, args: Option<&Value>) -> Result<usize>
             let row: Vec<String> = arr.iter().map(val_as_string).collect();
             if row.len() != data.headers.len() {
                 return Err(MCSError::InvalidParams(format!(
-                    "Row {i} has {} values, expected {}", row.len(), data.headers.len()
+                    "Row {i} has {} values, expected {}",
+                    row.len(),
+                    data.headers.len()
                 )));
             }
             data.rows.push(row);
         } else {
-            return Err(MCSError::InvalidParams(format!("Row {i} must be an object or array")));
+            return Err(MCSError::InvalidParams(format!(
+                "Row {i} must be an object or array"
+            )));
         }
         count += 1;
     }
@@ -596,14 +672,17 @@ fn get_opt_u64(args: Option<&Value>, name: &str) -> Option<u64> {
 }
 
 fn get_str_array(args: Option<&Value>, name: &str) -> Result<Vec<String>> {
-    let arr = args.and_then(|a| a.get(name))
+    let arr = args
+        .and_then(|a| a.get(name))
         .and_then(|v| v.as_array())
-        .ok_or_else(|| MCSError::InvalidParams(format!("Missing required: '{name}' (must be an array)")))?;
+        .ok_or_else(|| {
+            MCSError::InvalidParams(format!("Missing required: '{name}' (must be an array)"))
+        })?;
     let mut result = Vec::with_capacity(arr.len());
     for (i, v) in arr.iter().enumerate() {
-        let s = v.as_str().ok_or_else(|| {
-            MCSError::InvalidParams(format!("'{name}[{i}]' must be a string"))
-        })?;
+        let s = v
+            .as_str()
+            .ok_or_else(|| MCSError::InvalidParams(format!("'{name}[{i}]' must be a string")))?;
         result.push(s.to_string());
     }
     Ok(result)
@@ -611,7 +690,11 @@ fn get_str_array(args: Option<&Value>, name: &str) -> Result<Vec<String>> {
 
 fn get_opt_str_array(args: Option<&Value>, name: &str) -> Option<Vec<String>> {
     let arr = args.and_then(|a| a.get(name)).and_then(|v| v.as_array())?;
-    let result: Vec<String> = arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect();
+    let result: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect();
     Some(result)
 }
 

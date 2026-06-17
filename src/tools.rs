@@ -57,7 +57,11 @@ pub fn tool_exists(name: &str) -> bool {
 
 #[inline]
 pub fn is_write_tool(name: &str) -> bool {
-    ALL_TOOLS.iter().find(|t| t.name == name).map(|t| t.write).unwrap_or(false)
+    ALL_TOOLS
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.write)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

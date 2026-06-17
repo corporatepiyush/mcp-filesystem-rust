@@ -41,7 +41,11 @@ impl JsonRpcResponse {
         Self {
             jsonrpc: "2.0".into(),
             result: None,
-            error: Some(JsonRpcError { code, message, data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
             id,
         }
     }
@@ -67,7 +71,8 @@ mod tests {
 
     #[test]
     fn test_response_success() {
-        let resp = JsonRpcResponse::success(Some(Value::Number(1.into())), json!({"content": "hello"}));
+        let resp =
+            JsonRpcResponse::success(Some(Value::Number(1.into())), json!({"content": "hello"}));
         assert_eq!(resp.jsonrpc, "2.0");
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
@@ -75,7 +80,11 @@ mod tests {
 
     #[test]
     fn test_response_error() {
-        let resp = JsonRpcResponse::error(Some(Value::Number(1.into())), -32602, "Invalid params".into());
+        let resp = JsonRpcResponse::error(
+            Some(Value::Number(1.into())),
+            -32602,
+            "Invalid params".into(),
+        );
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
         assert_eq!(err.code, -32602);

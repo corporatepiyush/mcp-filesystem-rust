@@ -28,9 +28,7 @@ fn main() -> Result<()> {
     set_mimalloc_opts();
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        inner_main().await
-    })
+    rt.block_on(async { inner_main().await })
 }
 
 async fn inner_main() -> Result<()> {

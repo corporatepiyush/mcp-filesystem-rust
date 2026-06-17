@@ -16,11 +16,17 @@ struct PathTrieNode {
 
 impl PathTrieNode {
     const fn new() -> Self {
-        Self { children: Vec::new(), is_end: false }
+        Self {
+            children: Vec::new(),
+            is_end: false,
+        }
     }
 
     fn get_child(&self, component: &str) -> Option<&PathTrieNode> {
-        self.children.iter().find(|(name, _)| name == component).map(|(_, node)| node)
+        self.children
+            .iter()
+            .find(|(name, _)| name == component)
+            .map(|(_, node)| node)
     }
 
     fn get_or_insert_child(&mut self, component: &str) -> &mut PathTrieNode {
@@ -28,7 +34,8 @@ impl PathTrieNode {
         match pos {
             Some(i) => &mut self.children[i].1,
             None => {
-                self.children.push((component.to_string(), PathTrieNode::new()));
+                self.children
+                    .push((component.to_string(), PathTrieNode::new()));
                 &mut self.children.last_mut().unwrap().1
             }
         }
@@ -46,7 +53,9 @@ pub struct PathTrie {
 
 impl PathTrie {
     pub const fn new() -> Self {
-        Self { root: PathTrieNode::new() }
+        Self {
+            root: PathTrieNode::new(),
+        }
     }
 
     /// Insert a path into the trie. Path components are split and
@@ -109,15 +118,17 @@ impl PathTrie {
                 },
                 Component::CurDir => {}
                 Component::ParentDir => return false,
-                Component::Prefix(_) => match current.get_child(&component.as_os_str().to_string_lossy()) {
-                    Some(child) => {
-                        current = child;
-                        if child.is_end {
-                            matched = true;
+                Component::Prefix(_) => {
+                    match current.get_child(&component.as_os_str().to_string_lossy()) {
+                        Some(child) => {
+                            current = child;
+                            if child.is_end {
+                                matched = true;
+                            }
                         }
+                        None => return matched,
                     }
-                    None => return matched,
-                },
+                }
             }
         }
 
@@ -128,7 +139,11 @@ impl PathTrie {
     pub fn longest_prefix(&self, path: &Path) -> Option<PathBuf> {
         let mut current = &self.root;
         let mut result = PathBuf::new();
-        let mut last_match = if current.is_end { Some(result.clone()) } else { None };
+        let mut last_match = if current.is_end {
+            Some(result.clone())
+        } else {
+            None
+        };
 
         for component in path.components() {
             match component {
@@ -209,7 +224,12 @@ impl<T> RingBuffer<T> {
         for _ in 0..capacity {
             buffer.push(None);
         }
-        Self { buffer, head: 0, size: 0, capacity }
+        Self {
+            buffer,
+            head: 0,
+            size: 0,
+            capacity,
+        }
     }
 
     pub fn push(&mut self, item: T) {
@@ -271,7 +291,10 @@ impl<T> RingBuffer<T> {
     }
 
     pub const fn iter(&self) -> RingBufferIter<'_, T> {
-        RingBufferIter { buffer: self, index: 0 }
+        RingBufferIter {
+            buffer: self,
+            index: 0,
+        }
     }
 }
 
@@ -321,7 +344,10 @@ pub struct LruCache<K, V> {
 
 impl<K: Eq, V> LruCache<K, V> {
     pub fn new(capacity: usize) -> Self {
-        Self { entries: VecDeque::with_capacity(capacity), capacity }
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
@@ -400,7 +426,9 @@ impl<T: Ord> SortedVec<T> {
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { inner: Vec::with_capacity(capacity) }
+        Self {
+            inner: Vec::with_capacity(capacity),
+        }
     }
 
     /// Insert an element in sorted position. Returns the insertion index.
@@ -512,7 +540,12 @@ impl BloomFilter {
         let size = optimal_bit_count(expected_items, false_positive_rate).max(1);
         let num_hashes = optimal_hash_count(expected_items, size).max(1);
         let num_u64s = size.div_ceil(64);
-        Self { bits: vec![0u64; num_u64s], num_hashes, size, inserted: 0 }
+        Self {
+            bits: vec![0u64; num_u64s],
+            num_hashes,
+            size,
+            inserted: 0,
+        }
     }
 
     pub fn insert(&mut self, item: &[u8]) {

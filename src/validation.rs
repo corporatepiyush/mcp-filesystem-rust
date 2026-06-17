@@ -13,9 +13,13 @@ fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::ParentDir => { result.pop(); }
+            Component::ParentDir => {
+                result.pop();
+            }
             Component::CurDir => {}
-            _ => { result.push(component); }
+            _ => {
+                result.push(component);
+            }
         }
     }
     result
@@ -107,20 +111,22 @@ impl Sandbox {
 
         let canonical = canonicalize_or_parent(&normalized)?;
 
-        let root_path = self.trie.longest_prefix(&canonical).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let root_path = self
+            .trie
+            .longest_prefix(&canonical)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
 
-        let dir = self.roots.get(&root_path).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
-        let dir = dir.try_clone().map_err(|e| {
-            MCSError::FilesystemError(format!("Failed to clone Dir handle: {e}"))
-        })?;
+        let dir = self
+            .roots
+            .get(&root_path)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
+        let dir = dir
+            .try_clone()
+            .map_err(|e| MCSError::FilesystemError(format!("Failed to clone Dir handle: {e}")))?;
 
-        let relative = canonical.strip_prefix(&root_path).map_err(|_| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let relative = canonical
+            .strip_prefix(&root_path)
+            .map_err(|_| MCSError::PathNotAllowed(path.to_string()))?;
 
         Ok((dir, relative.to_path_buf()))
     }
@@ -142,20 +148,22 @@ impl Sandbox {
 
         let canonical = canonicalize_or_parent(&normalized)?;
 
-        let root_path = self.trie.longest_prefix(&canonical).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let root_path = self
+            .trie
+            .longest_prefix(&canonical)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
 
-        let dir = self.roots.get(&root_path).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
-        let dir = dir.try_clone().map_err(|e| {
-            MCSError::FilesystemError(format!("Failed to clone Dir handle: {e}"))
-        })?;
+        let dir = self
+            .roots
+            .get(&root_path)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
+        let dir = dir
+            .try_clone()
+            .map_err(|e| MCSError::FilesystemError(format!("Failed to clone Dir handle: {e}")))?;
 
-        let relative = canonical.strip_prefix(&root_path).map_err(|_| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let relative = canonical
+            .strip_prefix(&root_path)
+            .map_err(|_| MCSError::PathNotAllowed(path.to_string()))?;
 
         Ok((dir, relative.to_path_buf()))
     }
@@ -177,9 +185,10 @@ impl Sandbox {
 
         let canonical = canonicalize_or_parent(&normalized)?;
 
-        let _root_path = self.trie.longest_prefix(&canonical).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let _root_path = self
+            .trie
+            .longest_prefix(&canonical)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
 
         Ok(canonical)
     }
@@ -200,13 +209,15 @@ impl Sandbox {
 
         let canonical = canonicalize_or_parent(&normalized)?;
 
-        let root_path = self.trie.longest_prefix(&canonical).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let root_path = self
+            .trie
+            .longest_prefix(&canonical)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
 
-        let _dir = self.roots.get(&root_path).ok_or_else(|| {
-            MCSError::PathNotAllowed(path.to_string())
-        })?;
+        let _dir = self
+            .roots
+            .get(&root_path)
+            .ok_or_else(|| MCSError::PathNotAllowed(path.to_string()))?;
 
         Ok(canonical)
     }
@@ -227,7 +238,9 @@ impl Sandbox {
             file.read_to_end(&mut buf)
                 .map_err(|e| MCSError::FilesystemError(format!("Cannot read file: {e}")))?;
             Ok(buf)
-        }).await.map_err(|e| MCSError::FilesystemError(format!("Read task failed: {e}")))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Read task failed: {e}")))?
     }
 
     /// Read entire file into a String.
@@ -243,16 +256,16 @@ impl Sandbox {
         let path_owned = path.to_string();
         tokio::task::spawn_blocking(move || {
             let mut file = dir.create(&rel).map_err(|e| {
-                MCSError::FilesystemError(format!(
-                    "Cannot create file '{}': {e}", path_owned
-                ))
+                MCSError::FilesystemError(format!("Cannot create file '{}': {e}", path_owned))
             })?;
             file.write_all(&content)
                 .map_err(|e| MCSError::FilesystemError(format!("Cannot write file: {e}")))?;
             file.flush()
                 .map_err(|e| MCSError::FilesystemError(format!("Cannot flush file: {e}")))?;
             Ok(())
-        }).await.map_err(|e| MCSError::FilesystemError(format!("Write task failed: {e}")))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Write task failed: {e}")))?
     }
 
     /// Get file metadata.
@@ -267,7 +280,9 @@ impl Sandbox {
                     MCSError::FilesystemError(format!("Cannot read metadata: {e}"))
                 }
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!("Metadata task failed: {e}")))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Metadata task failed: {e}")))?
     }
 
     /// Create directory and all parents.
@@ -276,13 +291,11 @@ impl Sandbox {
         let path_owned = path.to_string();
         tokio::task::spawn_blocking(move || {
             dir.create_dir_all(&rel).map_err(|e| {
-                MCSError::FilesystemError(format!(
-                    "Cannot create directory '{}': {e}", path_owned
-                ))
+                MCSError::FilesystemError(format!("Cannot create directory '{}': {e}", path_owned))
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Create dir task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Create dir task failed: {e}")))?
     }
 
     /// Read directory entries (returns (name, is_dir) pairs).
@@ -291,9 +304,7 @@ impl Sandbox {
         let path_owned = path.to_string();
         tokio::task::spawn_blocking(move || {
             let read_dir = dir.read_dir(&rel).map_err(|e| {
-                MCSError::FilesystemError(format!(
-                    "Cannot read directory '{}': {e}", path_owned
-                ))
+                MCSError::FilesystemError(format!("Cannot read directory '{}': {e}", path_owned))
             })?;
             let mut entries = Vec::new();
             for entry in read_dir {
@@ -307,9 +318,9 @@ impl Sandbox {
                 entries.push((name, file_type.is_dir()));
             }
             Ok(entries)
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Read dir task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Read dir task failed: {e}")))?
     }
 
     /// Remove a file.
@@ -318,13 +329,11 @@ impl Sandbox {
         let path_owned = path.to_string();
         tokio::task::spawn_blocking(move || {
             dir.remove_file(&rel).map_err(|e| {
-                MCSError::FilesystemError(format!(
-                    "Cannot remove file '{}': {e}", path_owned
-                ))
+                MCSError::FilesystemError(format!("Cannot remove file '{}': {e}", path_owned))
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Remove file task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Remove file task failed: {e}")))?
     }
 
     /// Remove an empty directory.
@@ -333,13 +342,11 @@ impl Sandbox {
         let path_owned = path.to_string();
         tokio::task::spawn_blocking(move || {
             dir.remove_dir(&rel).map_err(|e| {
-                MCSError::FilesystemError(format!(
-                    "Cannot remove directory '{}': {e}", path_owned
-                ))
+                MCSError::FilesystemError(format!("Cannot remove directory '{}': {e}", path_owned))
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Remove dir task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Remove dir task failed: {e}")))?
     }
 
     /// Remove a directory and all its contents.
@@ -349,12 +356,13 @@ impl Sandbox {
         tokio::task::spawn_blocking(move || {
             dir.remove_dir_all(&rel).map_err(|e| {
                 MCSError::FilesystemError(format!(
-                    "Cannot remove directory tree '{}': {e}", path_owned
+                    "Cannot remove directory tree '{}': {e}",
+                    path_owned
                 ))
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Remove dir all task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Remove dir all task failed: {e}")))?
     }
 
     /// Rename (move) a file or directory.
@@ -362,12 +370,14 @@ impl Sandbox {
         let src_abs = canonicalize_or_parent(&normalize_path(&to_abs(src)))?;
         let dst_abs = canonicalize_or_parent(&normalize_path(&to_abs(dst)))?;
 
-        let src_root = self.trie.longest_prefix(&src_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(src.to_string())
-        })?;
-        let dst_root = self.trie.longest_prefix(&dst_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(dst.to_string())
-        })?;
+        let src_root = self
+            .trie
+            .longest_prefix(&src_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(src.to_string()))?;
+        let dst_root = self
+            .trie
+            .longest_prefix(&dst_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(dst.to_string()))?;
 
         let follow = self.follow_symlinks;
         let src_owned = src.to_string();
@@ -381,9 +391,10 @@ impl Sandbox {
         }
 
         if src_root == dst_root {
-            let dir = self.roots.get(&src_root).ok_or_else(|| {
-                MCSError::PathNotAllowed(src.to_string())
-            })?;
+            let dir = self
+                .roots
+                .get(&src_root)
+                .ok_or_else(|| MCSError::PathNotAllowed(src.to_string()))?;
             let dir = dir.try_clone().map_err(|e| {
                 MCSError::FilesystemError(format!("Failed to clone Dir handle: {e}"))
             })?;
@@ -393,12 +404,12 @@ impl Sandbox {
             let rel_src = src_abs.strip_prefix(&src_root).unwrap().to_path_buf();
             let rel_dst = dst_abs.strip_prefix(&dst_root).unwrap().to_path_buf();
             tokio::task::spawn_blocking(move || {
-                dir.rename(&rel_src, &dst_dir, &rel_dst).map_err(|e| {
-                    MCSError::FilesystemError(format!("Cannot rename: {e}"))
-                })
-            }).await
-                .map_err(|e| MCSError::FilesystemError(format!("Rename task failed: {e}")))?
-                .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))?;
+                dir.rename(&rel_src, &dst_dir, &rel_dst)
+                    .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))
+            })
+            .await
+            .map_err(|e| MCSError::FilesystemError(format!("Rename task failed: {e}")))?
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))?;
         } else {
             if !follow {
                 check_symlinks_in_path(&src_abs).map_err(|_| {
@@ -409,12 +420,12 @@ impl Sandbox {
                 })?;
             }
             tokio::task::spawn_blocking(move || {
-                std::fs::rename(&src_abs, &dst_abs).map_err(|e| {
-                    MCSError::FilesystemError(format!("Cannot rename: {e}"))
-                })
-            }).await
-                .map_err(|e| MCSError::FilesystemError(format!("Rename task failed: {e}")))?
-                .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))?;
+                std::fs::rename(&src_abs, &dst_abs)
+                    .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))
+            })
+            .await
+            .map_err(|e| MCSError::FilesystemError(format!("Rename task failed: {e}")))?
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot rename: {e}")))?;
         }
         Ok(())
     }
@@ -424,30 +435,30 @@ impl Sandbox {
         let src_abs = canonicalize_or_parent(&normalize_path(&to_abs(src)))?;
         let dst_abs = canonicalize_or_parent(&normalize_path(&to_abs(dst)))?;
 
-        let _src_root = self.trie.longest_prefix(&src_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(src.to_string())
-        })?;
-        let _dst_root = self.trie.longest_prefix(&dst_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(dst.to_string())
-        })?;
+        let _src_root = self
+            .trie
+            .longest_prefix(&src_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(src.to_string()))?;
+        let _dst_root = self
+            .trie
+            .longest_prefix(&dst_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(dst.to_string()))?;
 
         let follow = self.follow_symlinks;
         if !follow {
-            check_symlinks_in_path(&src_abs).map_err(|_| {
-                MCSError::PathNotAllowed(format!("Symlink in source path: {src}"))
-            })?;
+            check_symlinks_in_path(&src_abs)
+                .map_err(|_| MCSError::PathNotAllowed(format!("Symlink in source path: {src}")))?;
             check_symlinks_in_path(&dst_abs).map_err(|_| {
                 MCSError::PathNotAllowed(format!("Symlink in destination path: {dst}"))
             })?;
         }
 
         tokio::task::spawn_blocking(move || {
-            std::fs::copy(&src_abs, &dst_abs).map_err(|e| {
-                MCSError::FilesystemError(format!("Cannot copy: {e}"))
-            })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Copy task failed: {e}"
-        )))?
+            std::fs::copy(&src_abs, &dst_abs)
+                .map_err(|e| MCSError::FilesystemError(format!("Cannot copy: {e}")))
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Copy task failed: {e}")))?
     }
 
     /// Set permissions on a file (Unix only).
@@ -457,12 +468,13 @@ impl Sandbox {
         tokio::task::spawn_blocking(move || {
             dir.set_permissions(&rel, perm).map_err(|e| {
                 MCSError::FilesystemError(format!(
-                    "Cannot set permissions on '{}': {e}", path_owned
+                    "Cannot set permissions on '{}': {e}",
+                    path_owned
                 ))
             })
-        }).await.map_err(|e| MCSError::FilesystemError(format!(
-            "Set permissions task failed: {e}"
-        )))?
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Set permissions task failed: {e}")))?
     }
 
     /// Create a symlink (Unix only, within sandbox).
@@ -470,22 +482,24 @@ impl Sandbox {
         let src_abs = canonicalize_or_parent(&normalize_path(&to_abs(src)))?;
         let link_abs = canonicalize_or_parent(&normalize_path(&to_abs(link)))?;
 
-        let _src_root = self.trie.longest_prefix(&src_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(src.to_string())
-        })?;
-        let _link_root = self.trie.longest_prefix(&link_abs).ok_or_else(|| {
-            MCSError::PathNotAllowed(link.to_string())
-        })?;
+        let _src_root = self
+            .trie
+            .longest_prefix(&src_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(src.to_string()))?;
+        let _link_root = self
+            .trie
+            .longest_prefix(&link_abs)
+            .ok_or_else(|| MCSError::PathNotAllowed(link.to_string()))?;
 
         #[cfg(unix)]
         {
             tokio::task::spawn_blocking(move || {
-                std::os::unix::fs::symlink(&src_abs, &link_abs).map_err(|e| {
-                    MCSError::FilesystemError(format!("Cannot create symlink: {e}"))
-                })
-            }).await
-                .map_err(|e| MCSError::FilesystemError(format!("Symlink task failed: {e}")))?
-                .map_err(|e| MCSError::FilesystemError(format!("Cannot create symlink: {e}")))?;
+                std::os::unix::fs::symlink(&src_abs, &link_abs)
+                    .map_err(|e| MCSError::FilesystemError(format!("Cannot create symlink: {e}")))
+            })
+            .await
+            .map_err(|e| MCSError::FilesystemError(format!("Symlink task failed: {e}")))?
+            .map_err(|e| MCSError::FilesystemError(format!("Cannot create symlink: {e}")))?;
         }
 
         #[cfg(windows)]
@@ -529,9 +543,9 @@ fn check_symlinks_in_path(path: &Path) -> std::result::Result<(), ()> {
 pub fn validate_path(path: &str, config: &Config) -> Result<PathBuf> {
     let abs = to_abs(path);
     let normalized = normalize_path(&abs);
-    let canonical = normalized.canonicalize().map_err(|_| {
-        MCSError::PathNotFound(format!("Path does not exist: {path}"))
-    })?;
+    let canonical = normalized
+        .canonicalize()
+        .map_err(|_| MCSError::PathNotFound(format!("Path does not exist: {path}")))?;
     if config.allowed_trie_ref().contains(&canonical) {
         Ok(canonical)
     } else {
@@ -567,7 +581,10 @@ mod tests {
     fn cfg() -> Config {
         let mut c = Config::default();
         c.allowed_directories = vec![
-            std::env::current_dir().unwrap().to_string_lossy().to_string(),
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
         ];
         c.rebuild_trie();
         c

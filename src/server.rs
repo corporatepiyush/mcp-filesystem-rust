@@ -1,6 +1,6 @@
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, warn};
@@ -36,7 +36,11 @@ enum LineRead {
 /// Read a single newline-terminated line into `out`, but never buffer more than
 /// `max` bytes. On overflow returns `TooLong` without allocating the whole line,
 /// so a hostile client cannot exhaust memory with one giant unterminated line.
-async fn read_line_capped<R>(reader: &mut R, out: &mut String, max: usize) -> std::io::Result<LineRead>
+async fn read_line_capped<R>(
+    reader: &mut R,
+    out: &mut String,
+    max: usize,
+) -> std::io::Result<LineRead>
 where
     R: AsyncBufReadExt + Unpin,
 {
@@ -81,12 +85,15 @@ where
 /// early-return on the first differing byte.
 pub fn token_matches(presented: &str, expected: &str) -> bool {
     let presented = presented.trim();
-    let presented = presented.strip_prefix("Bearer ").unwrap_or(presented).trim();
-    
+    let presented = presented
+        .strip_prefix("Bearer ")
+        .unwrap_or(presented)
+        .trim();
+
     // Use hashes to ensure constant-time comparison even if lengths differ.
     let h_presented = Sha256::digest(presented.as_bytes());
     let h_expected = Sha256::digest(expected.as_bytes());
-    
+
     h_presented.ct_eq(&h_expected).into()
 }
 
@@ -109,7 +116,9 @@ pub struct MCPServer {
 
 impl MCPServer {
     pub fn new(config: Config) -> Self {
-        Self { config: Arc::new(config) }
+        Self {
+            config: Arc::new(config),
+        }
     }
 
     pub const fn from_arc(config: Arc<Config>) -> Self {
@@ -153,7 +162,9 @@ impl MCPServer {
 
         loop {
             // Acquire a permit before accepting so we apply backpressure.
-            let permit = Arc::clone(&limiter).acquire_owned().await
+            let permit = Arc::clone(&limiter)
+                .acquire_owned()
+                .await
                 .expect("connection semaphore closed");
             let (socket, peer_addr) = listener.accept().await?;
             if let Err(e) = socket.set_nodelay(true) {
@@ -185,7 +196,9 @@ async fn handle_client(socket: TcpStream, config: Arc<Config>) -> MCSResult<()> 
             Ok(LineRead::Line) if token_matches(&line, expected) => {}
             Ok(LineRead::Eof) => return Ok(()),
             _ => {
-                let err = MCSError::InvalidParams("Authentication required: send the bearer token as the first line".into());
+                let err = MCSError::InvalidParams(
+                    "Authentication required: send the bearer token as the first line".into(),
+                );
                 let response = JsonRpcResponse::error(None, err.error_code(), err.to_string());
                 response_buf.clear();
                 serde_json::to_writer(&mut response_buf, &response)?;
@@ -240,12 +253,20 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
     let (response, is_notification) = match parse_request(line) {
         Ok(req) => {
             let is_notif = req.id.is_none();
-            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config)).await {
+            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config))
+                .await
+            {
                 Ok(Ok(result)) => (JsonRpcResponse::success(req.id, result), is_notif),
-                Ok(Err(e)) => (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif),
+                Ok(Err(e)) => (
+                    JsonRpcResponse::error(req.id, e.error_code(), e.to_string()),
+                    is_notif,
+                ),
                 Err(_) => {
                     let e = timeout_error(config);
-                    (JsonRpcResponse::error(req.id, e.error_code(), e.to_string()), is_notif)
+                    (
+                        JsonRpcResponse::error(req.id, e.error_code(), e.to_string()),
+                        is_notif,
+                    )
                 }
             }
         }
@@ -353,7 +374,9 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         "edit_file" => actions::files::edit_file(tool_args, config).await,
         "create_directory" => actions::files::create_directory(tool_args, config).await,
         "list_directory" => actions::files::list_directory(tool_args, config).await,
-        "list_directory_with_sizes" => actions::files::list_directory_with_sizes(tool_args, config).await,
+        "list_directory_with_sizes" => {
+            actions::files::list_directory_with_sizes(tool_args, config).await
+        }
         "move_file" => actions::files::move_file(tool_args, config).await,
         "copy_file" => actions::files::copy_file(tool_args, config).await,
         "delete_file" => actions::files::delete_file(tool_args, config).await,
@@ -361,7 +384,9 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         "search_files" => actions::files::search_files(tool_args, config).await,
         "directory_tree" => actions::files::directory_tree(tool_args, config).await,
         "get_file_info" => actions::files::get_file_info(tool_args, config).await,
-        "list_allowed_directories" => actions::files::list_allowed_directories(tool_args, config).await,
+        "list_allowed_directories" => {
+            actions::files::list_allowed_directories(tool_args, config).await
+        }
         "hash_file" => actions::files::hash_file(tool_args, config).await,
         "grep_files" => actions::files::grep_files(tool_args, config).await,
         "set_permissions" => actions::files::set_permissions(tool_args, config).await,
@@ -385,7 +410,9 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         "csv_add_column" => actions::csv::csv_add_column(tool_args, config).await,
         "csv_remove_column" => actions::csv::csv_remove_column(tool_args, config).await,
         "csv_rename_column" => actions::csv::csv_rename_column(tool_args, config).await,
-        "csv_read_column_values_range" => actions::csv::csv_read_column_values_range(tool_args, config).await,
+        "csv_read_column_values_range" => {
+            actions::csv::csv_read_column_values_range(tool_args, config).await
+        }
         "csv_read_row_range" => actions::csv::csv_read_row_range(tool_args, config).await,
         "csv_select_column_range" => actions::csv::csv_select_column_range(tool_args, config).await,
         tool => Err(method_not_found(tool)),

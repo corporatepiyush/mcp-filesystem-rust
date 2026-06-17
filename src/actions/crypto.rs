@@ -12,7 +12,9 @@ use zeroize::Zeroizing;
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
 
-use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret};
+use pqcrypto_traits::kem::{
+    Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret,
+};
 
 // ── Constants ────────────────────────────────────────────
 
@@ -48,13 +50,17 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     }
     if metadata.len() > config.max_file_size {
         return Err(MCSError::FilesystemError(format!(
-            "File size {size} exceeds max {max}", size = metadata.len(), max = config.max_file_size
+            "File size {size} exceeds max {max}",
+            size = metadata.len(),
+            max = config.max_file_size
         )));
     }
 
     let output_path = resolve_crypto_output(&valid_path, output.as_deref(), config)?;
     if output_path == valid_path {
-        return Err(MCSError::InvalidParams("Output must differ from source".into()));
+        return Err(MCSError::InvalidParams(
+            "Output must differ from source".into(),
+        ));
     }
 
     let algo_id = algorithm_to_id(&algorithm)?;
@@ -71,64 +77,77 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         let bytes = hex::decode(&trimmed)
             .map_err(|e| MCSError::InvalidParams(format!("Invalid key hex in file: {e}")))?;
         if bytes.len() != SYMMETRIC_KEY_SIZE {
-            return Err(MCSError::InvalidParams(
-                format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes")
-            ));
+            return Err(MCSError::InvalidParams(format!(
+                "Key must be {SYMMETRIC_KEY_SIZE} hex bytes"
+            )));
         }
         Some(bytes)
     } else {
         None
     };
 
-    let result = tokio::task::spawn_blocking(move || -> std::result::Result<EncryptResult, String> {
-        match algo_id {
-            ALGO_AES256GCM | ALGO_CHACHA20 => {
-                let key = match (key_opt, resolved_key_bytes, generate) {
-                    (Some(k), _, _) => {
-                        let bytes = hex::decode(&k)
-                            .map_err(|e| format!("Invalid key hex: {e}"))?;
-                        if bytes.len() != SYMMETRIC_KEY_SIZE {
-                            return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
+    let result =
+        tokio::task::spawn_blocking(move || -> std::result::Result<EncryptResult, String> {
+            match algo_id {
+                ALGO_AES256GCM | ALGO_CHACHA20 => {
+                    let key = match (key_opt, resolved_key_bytes, generate) {
+                        (Some(k), _, _) => {
+                            let bytes =
+                                hex::decode(&k).map_err(|e| format!("Invalid key hex: {e}"))?;
+                            if bytes.len() != SYMMETRIC_KEY_SIZE {
+                                return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
+                            }
+                            bytes
                         }
-                        bytes
-                    }
-                    (_, Some(bytes), _) => bytes,
-                    (None, None, true) => {
-                        let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
-                        OsRng.fill_bytes(&mut key);
-                        key
-                    }
-                    (None, None, false) => {
-                        return Err("No key provided. Use 'key', 'keyFile', or 'generateKey: true'".into());
-                    }
-                };
-                let key_hex = Zeroizing::new(hex::encode(&*key));
-                let (header, ciphertext) = symmetric_encrypt(&file_data, &key_hex, algo_id)?;
-                write_encrypted(&dst, &header, &ciphertext)?;
-                let returned = if generate { Some(hex::encode(&*key)) } else { None };
-                Ok(EncryptResult { key: returned })
+                        (_, Some(bytes), _) => bytes,
+                        (None, None, true) => {
+                            let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
+                            OsRng.fill_bytes(&mut key);
+                            key
+                        }
+                        (None, None, false) => {
+                            return Err(
+                                "No key provided. Use 'key', 'keyFile', or 'generateKey: true'"
+                                    .into(),
+                            );
+                        }
+                    };
+                    let key_hex = Zeroizing::new(hex::encode(&*key));
+                    let (header, ciphertext) = symmetric_encrypt(&file_data, &key_hex, algo_id)?;
+                    write_encrypted(&dst, &header, &ciphertext)?;
+                    let returned = if generate {
+                        Some(hex::encode(&*key))
+                    } else {
+                        None
+                    };
+                    Ok(EncryptResult { key: returned })
+                }
+                ALGO_RSA2048 | ALGO_RSA4096 => {
+                    let bits = if algo_id == ALGO_RSA2048 { 2048 } else { 4096 };
+                    let pub_pem = pub_key_opt
+                        .as_ref()
+                        .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
+                    let (header, ciphertext, _sym_key) = rsa_encrypt(&file_data, pub_pem, bits)?;
+                    write_encrypted(&dst, &header, &ciphertext)?;
+                    Ok(EncryptResult { key: None })
+                }
+                ALGO_MLKEM768 | ALGO_MLKEM1024 => {
+                    let pub_hex = pub_key_opt
+                        .as_ref()
+                        .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
+                    let pub_bytes =
+                        hex::decode(pub_hex).map_err(|e| format!("Invalid public key hex: {e}"))?;
+                    let (header, ciphertext, _sym_key) =
+                        mlkem_encrypt(&file_data, &pub_bytes, algo_id)?;
+                    write_encrypted(&dst, &header, &ciphertext)?;
+                    Ok(EncryptResult { key: None })
+                }
+                _ => Err("Unsupported algorithm".to_string()),
             }
-            ALGO_RSA2048 | ALGO_RSA4096 => {
-                let bits = if algo_id == ALGO_RSA2048 { 2048 } else { 4096 };
-                let pub_pem = pub_key_opt.as_ref()
-                    .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
-                let (header, ciphertext, _sym_key) = rsa_encrypt(&file_data, pub_pem, bits)?;
-                write_encrypted(&dst, &header, &ciphertext)?;
-                Ok(EncryptResult { key: None })
-            }
-            ALGO_MLKEM768 | ALGO_MLKEM1024 => {
-                let pub_hex = pub_key_opt.as_ref()
-                    .ok_or_else(|| "Missing required: 'publicKey'".to_string())?;
-                let pub_bytes = hex::decode(pub_hex)
-                    .map_err(|e| format!("Invalid public key hex: {e}"))?;
-                let (header, ciphertext, _sym_key) = mlkem_encrypt(&file_data, &pub_bytes, algo_id)?;
-                write_encrypted(&dst, &header, &ciphertext)?;
-                Ok(EncryptResult { key: None })
-            }
-            _ => Err("Unsupported algorithm".to_string()),
-        }
-    }).await.map_err(|e| MCSError::FilesystemError(format!("Encrypt task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Encrypt task failed: {e}")))?
+        .map_err(MCSError::FilesystemError)?;
 
     let mut resp = json!({
         "success": true,
@@ -136,7 +155,9 @@ pub async fn encrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         "output": output_path.to_string_lossy(),
         "algorithm": algorithm,
     });
-    if let Some(k) = result.key { resp["key"] = json!(k); }
+    if let Some(k) = result.key {
+        resp["key"] = json!(k);
+    }
     Ok(resp)
 }
 
@@ -160,7 +181,9 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
     let output_path = resolve_decrypt_output(&valid_path, output.as_deref(), config)?;
 
     if output_path == valid_path {
-        return Err(MCSError::InvalidParams("Output must differ from source".into()));
+        return Err(MCSError::InvalidParams(
+            "Output must differ from source".into(),
+        ));
     }
 
     // Validate keyFile path through sandbox before spawn_blocking
@@ -172,9 +195,9 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
         let bytes = hex::decode(&trimmed)
             .map_err(|e| MCSError::InvalidParams(format!("Invalid key hex in file: {e}")))?;
         if bytes.len() != SYMMETRIC_KEY_SIZE {
-            return Err(MCSError::InvalidParams(
-                format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes")
-            ));
+            return Err(MCSError::InvalidParams(format!(
+                "Key must be {SYMMETRIC_KEY_SIZE} hex bytes"
+            )));
         }
         Some(bytes)
     } else {
@@ -186,8 +209,7 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
             ALGO_AES256GCM | ALGO_CHACHA20 => {
                 let key = match (key_opt, resolved_key_bytes) {
                     (Some(k), _) => {
-                        let bytes = hex::decode(&k)
-                            .map_err(|e| format!("Invalid key hex: {e}"))?;
+                        let bytes = hex::decode(&k).map_err(|e| format!("Invalid key hex: {e}"))?;
                         if bytes.len() != SYMMETRIC_KEY_SIZE {
                             return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} hex bytes"));
                         }
@@ -200,21 +222,25 @@ pub async fn decrypt_file(args: Option<&Value>, config: &Config) -> Result<Value
                 symmetric_decrypt(&body, &key_hex, &nonce, algo_id)
             }
             ALGO_RSA2048 | ALGO_RSA4096 => {
-                let priv_pem = priv_key_opt.as_ref()
+                let priv_pem = priv_key_opt
+                    .as_ref()
                     .ok_or_else(|| "Missing required: 'privateKey'".to_string())?;
                 rsa_decrypt(&body, &enc_key, &nonce, priv_pem)
             }
             ALGO_MLKEM768 | ALGO_MLKEM1024 => {
-                let priv_hex = priv_key_opt.as_ref()
+                let priv_hex = priv_key_opt
+                    .as_ref()
                     .ok_or_else(|| "Missing required: 'privateKey'".to_string())?;
-                let priv_bytes = hex::decode(priv_hex)
-                    .map_err(|e| format!("Invalid private key hex: {e}"))?;
+                let priv_bytes =
+                    hex::decode(priv_hex).map_err(|e| format!("Invalid private key hex: {e}"))?;
                 mlkem_decrypt(&body, &enc_key, &nonce, &priv_bytes, algo_id)
             }
             _ => Err("Unsupported algorithm".into()),
         }
-    }).await.map_err(|e| MCSError::FilesystemError(format!("Decrypt task failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+    })
+    .await
+    .map_err(|e| MCSError::FilesystemError(format!("Decrypt task failed: {e}")))?
+    .map_err(MCSError::FilesystemError)?;
 
     let output_str = output_path.to_string_lossy().to_string();
     config.sandbox().write(&output_str, &result).await?;
@@ -245,65 +271,98 @@ pub async fn generate_key(args: Option<&Value>, config: &Config) -> Result<Value
     let alg_clone = algorithm.clone();
     let out_clone = validated_output.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> std::result::Result<KeygenResult, String> {
-        match alg_clone.as_str() {
-            "aes-256" => {
-                let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
-                OsRng.fill_bytes(&mut key);
-                let key_hex = hex::encode(&key);
-                if let Some(ref out) = out_clone {
-                    std::fs::write(out, &key_hex)
-                        .map_err(|e| format!("Cannot write key file: {e}"))?;
+    let result =
+        tokio::task::spawn_blocking(move || -> std::result::Result<KeygenResult, String> {
+            match alg_clone.as_str() {
+                "aes-256" => {
+                    let mut key = vec![0u8; SYMMETRIC_KEY_SIZE];
+                    OsRng.fill_bytes(&mut key);
+                    let key_hex = hex::encode(&key);
+                    if let Some(ref out) = out_clone {
+                        std::fs::write(out, &key_hex)
+                            .map_err(|e| format!("Cannot write key file: {e}"))?;
+                    }
+                    Ok(KeygenResult {
+                        key: Some(key_hex),
+                        public_key: None,
+                        private_key: None,
+                    })
                 }
-                Ok(KeygenResult { key: Some(key_hex), public_key: None, private_key: None })
-            }
-            "rsa-2048" | "rsa-4096" => {
-                let bits: usize = if alg_clone == "rsa-2048" { 2048 } else { 4096 };
-                let mut rng = OsRng;
-                let priv_key = RsaPrivateKey::new(&mut rng, bits)
-                    .map_err(|e| format!("RSA key generation failed: {e}"))?;
-                let pub_key = RsaPublicKey::from(&priv_key);
-                let priv_pem = priv_key.to_pkcs8_pem(LineEnding::LF)
-                    .map_err(|e| format!("PEM encoding failed: {e}"))?.to_string();
-                let pub_pem = pub_key.to_public_key_pem(LineEnding::LF)
-                    .map_err(|e| format!("PEM encoding failed: {e}"))?;
-                if let Some(ref out) = out_clone {
-                    let pub_path = out.with_extension("pub");
-                    std::fs::write(&pub_path, &pub_pem)
-                        .map_err(|e| format!("Cannot write public key: {e}"))?;
-                    std::fs::write(out, &priv_pem)
-                        .map_err(|e| format!("Cannot write private key: {e}"))?;
+                "rsa-2048" | "rsa-4096" => {
+                    let bits: usize = if alg_clone == "rsa-2048" { 2048 } else { 4096 };
+                    let mut rng = OsRng;
+                    let priv_key = RsaPrivateKey::new(&mut rng, bits)
+                        .map_err(|e| format!("RSA key generation failed: {e}"))?;
+                    let pub_key = RsaPublicKey::from(&priv_key);
+                    let priv_pem = priv_key
+                        .to_pkcs8_pem(LineEnding::LF)
+                        .map_err(|e| format!("PEM encoding failed: {e}"))?
+                        .to_string();
+                    let pub_pem = pub_key
+                        .to_public_key_pem(LineEnding::LF)
+                        .map_err(|e| format!("PEM encoding failed: {e}"))?;
+                    if let Some(ref out) = out_clone {
+                        let pub_path = out.with_extension("pub");
+                        std::fs::write(&pub_path, &pub_pem)
+                            .map_err(|e| format!("Cannot write public key: {e}"))?;
+                        std::fs::write(out, &priv_pem)
+                            .map_err(|e| format!("Cannot write private key: {e}"))?;
+                    }
+                    Ok(KeygenResult {
+                        key: None,
+                        public_key: Some(pub_pem),
+                        private_key: Some(priv_pem),
+                    })
                 }
-                Ok(KeygenResult { key: None, public_key: Some(pub_pem), private_key: Some(priv_pem) })
-            }
-            "kyber-768" | "kyber-1024" | "mlkem-768" | "mlkem-1024" => {
-                let (_pk, _sk, pk_hex, sk_hex) = if alg_clone == "kyber-768" || alg_clone == "mlkem-768" {
-                    let (pk, sk) = pqcrypto_mlkem::mlkem768::keypair();
-                    (pk.as_bytes().to_vec(), sk.as_bytes().to_vec(),
-                     hex::encode(pk.as_bytes()), hex::encode(sk.as_bytes()))
-                } else {
-                    let (pk, sk) = pqcrypto_mlkem::mlkem1024::keypair();
-                    (pk.as_bytes().to_vec(), sk.as_bytes().to_vec(),
-                     hex::encode(pk.as_bytes()), hex::encode(sk.as_bytes()))
-                };
-                if let Some(ref out) = out_clone {
-                    let pub_path = out.with_extension("pub");
-                    std::fs::write(out, &sk_hex)
-                        .map_err(|e| format!("Cannot write secret key: {e}"))?;
-                    std::fs::write(&pub_path, &pk_hex)
-                        .map_err(|e| format!("Cannot write public key: {e}"))?;
+                "kyber-768" | "kyber-1024" | "mlkem-768" | "mlkem-1024" => {
+                    let (_pk, _sk, pk_hex, sk_hex) =
+                        if alg_clone == "kyber-768" || alg_clone == "mlkem-768" {
+                            let (pk, sk) = pqcrypto_mlkem::mlkem768::keypair();
+                            (
+                                pk.as_bytes().to_vec(),
+                                sk.as_bytes().to_vec(),
+                                hex::encode(pk.as_bytes()),
+                                hex::encode(sk.as_bytes()),
+                            )
+                        } else {
+                            let (pk, sk) = pqcrypto_mlkem::mlkem1024::keypair();
+                            (
+                                pk.as_bytes().to_vec(),
+                                sk.as_bytes().to_vec(),
+                                hex::encode(pk.as_bytes()),
+                                hex::encode(sk.as_bytes()),
+                            )
+                        };
+                    if let Some(ref out) = out_clone {
+                        let pub_path = out.with_extension("pub");
+                        std::fs::write(out, &sk_hex)
+                            .map_err(|e| format!("Cannot write secret key: {e}"))?;
+                        std::fs::write(&pub_path, &pk_hex)
+                            .map_err(|e| format!("Cannot write public key: {e}"))?;
+                    }
+                    Ok(KeygenResult {
+                        key: None,
+                        public_key: Some(pk_hex),
+                        private_key: Some(sk_hex),
+                    })
                 }
-                Ok(KeygenResult { key: None, public_key: Some(pk_hex), private_key: Some(sk_hex) })
+                _ => Err(format!("Unsupported key algorithm: {alg_clone}")),
             }
-            _ => Err(format!("Unsupported key algorithm: {alg_clone}")),
-        }
-    }).await.map_err(|e| MCSError::FilesystemError(format!("Key generation failed: {e}")))?
-      .map_err(MCSError::FilesystemError)?;
+        })
+        .await
+        .map_err(|e| MCSError::FilesystemError(format!("Key generation failed: {e}")))?
+        .map_err(MCSError::FilesystemError)?;
 
     let mut resp = json!({ "success": true, "algorithm": algorithm });
-    if let Some(k) = result.key { resp["key"] = json!(k); }
-    if let Some(pk) = result.public_key { resp["publicKey"] = json!(pk); }
-    if let Some(sk) = result.private_key { resp["privateKey"] = json!(sk); }
+    if let Some(k) = result.key {
+        resp["key"] = json!(k);
+    }
+    if let Some(pk) = result.public_key {
+        resp["publicKey"] = json!(pk);
+    }
+    if let Some(sk) = result.private_key {
+        resp["privateKey"] = json!(sk);
+    }
     if let Some(ref out) = validated_output {
         if algorithm == "aes-256" {
             resp["keyFile"] = json!(out.to_string_lossy().to_string());
@@ -334,8 +393,7 @@ fn symmetric_encrypt(
     key_hex: &str,
     algo_id: u8,
 ) -> std::result::Result<(Vec<u8>, Vec<u8>), String> {
-    let key_bytes = hex::decode(key_hex)
-        .map_err(|e| format!("Invalid key hex: {e}"))?;
+    let key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key hex: {e}"))?;
     if key_bytes.len() != SYMMETRIC_KEY_SIZE {
         return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} bytes"));
     }
@@ -351,12 +409,26 @@ fn symmetric_encrypt(
         let key = chacha20poly1305::Key::from_slice(&key_bytes);
         let cipher = chacha20poly1305::ChaCha20Poly1305::new(key);
         let nonce_arr = chacha20poly1305::Nonce::from_slice(&nonce);
-        cipher.encrypt(nonce_arr, Payload { msg: plaintext, aad })
+        cipher
+            .encrypt(
+                nonce_arr,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|e| format!("ChaCha20 encryption failed: {e}"))?
     } else {
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
-        cipher.encrypt(AesNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+        cipher
+            .encrypt(
+                AesNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|e| format!("AES-256-GCM encryption failed: {e}"))?
     };
 
@@ -369,8 +441,7 @@ fn symmetric_decrypt(
     nonce: &[u8],
     algo_id: u8,
 ) -> std::result::Result<Vec<u8>, String> {
-    let key_bytes = hex::decode(key_hex)
-        .map_err(|e| format!("Invalid key hex: {e}"))?;
+    let key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key hex: {e}"))?;
     if key_bytes.len() != SYMMETRIC_KEY_SIZE {
         return Err(format!("Key must be {SYMMETRIC_KEY_SIZE} bytes"));
     }
@@ -383,12 +454,26 @@ fn symmetric_decrypt(
         let key = chacha20poly1305::Key::from_slice(&key_bytes);
         let cipher = chacha20poly1305::ChaCha20Poly1305::new(key);
         let nonce_arr = chacha20poly1305::Nonce::from_slice(nonce);
-        cipher.decrypt(nonce_arr, Payload { msg: ciphertext, aad })
+        cipher
+            .decrypt(
+                nonce_arr,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|e| format!("ChaCha20 decryption failed (wrong key or data): {e}"))?
     } else {
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
         let cipher = Aes256Gcm::new(key);
-        cipher.decrypt(AesNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        cipher
+            .decrypt(
+                AesNonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|e| format!("AES-256-GCM decryption failed (wrong key or data): {e}"))?
     };
 
@@ -408,19 +493,31 @@ fn rsa_encrypt(
     OsRng.fill_bytes(&mut sym_key);
 
     let mut rng = OsRng;
-    let enc_key = pub_key.encrypt(&mut rng, Oaep::new::<Sha256>(), &sym_key)
+    let enc_key = pub_key
+        .encrypt(&mut rng, Oaep::new::<Sha256>(), &sym_key)
         .map_err(|e| format!("RSA encryption failed: {e}"))?;
 
     let mut nonce = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce);
 
-    let algo_id = if bits == 2048 { ALGO_RSA2048 } else { ALGO_RSA4096 };
+    let algo_id = if bits == 2048 {
+        ALGO_RSA2048
+    } else {
+        ALGO_RSA4096
+    };
     let header = build_header(algo_id, &enc_key);
     let aad = &header[..header.len() - 2];
 
     let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&sym_key);
     let cipher = Aes256Gcm::new(key);
-    let ciphertext = cipher.encrypt(AesNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+    let ciphertext = cipher
+        .encrypt(
+            AesNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| format!("AES encryption failed: {e}"))?;
 
     Ok(([header, nonce.to_vec()].concat(), ciphertext, sym_key))
@@ -435,16 +532,28 @@ fn rsa_decrypt(
     let priv_key = RsaPrivateKey::from_pkcs8_pem(priv_key_pem)
         .map_err(|e| format!("Invalid RSA private key PEM: {e}"))?;
 
-    let sym_key = priv_key.decrypt(Oaep::new::<Sha256>(), enc_key)
+    let sym_key = priv_key
+        .decrypt(Oaep::new::<Sha256>(), enc_key)
         .map_err(|e| format!("RSA decryption failed: {e}"))?;
 
-    let algo_id = if enc_key.len() == 256 { ALGO_RSA2048 } else { ALGO_RSA4096 };
+    let algo_id = if enc_key.len() == 256 {
+        ALGO_RSA2048
+    } else {
+        ALGO_RSA4096
+    };
     let header = build_header(algo_id, enc_key);
     let aad = &header[..header.len() - 2];
 
     let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&sym_key);
     let cipher = Aes256Gcm::new(key);
-    let plaintext = cipher.decrypt(AesNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+    let plaintext = cipher
+        .decrypt(
+            AesNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| format!("AES decryption failed: {e}"))?;
 
     Ok(plaintext)
@@ -476,7 +585,14 @@ fn mlkem_encrypt(
 
     let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&shared_secret);
     let cipher = Aes256Gcm::new(key);
-    let ciphertext = cipher.encrypt(AesNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+    let ciphertext = cipher
+        .encrypt(
+            AesNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| format!("AES encryption failed: {e}"))?;
 
     Ok(([header, nonce.to_vec()].concat(), ciphertext, shared_secret))
@@ -494,13 +610,17 @@ fn mlkem_decrypt(
             .map_err(|e| format!("Invalid ML-KEM-768 secret key: {e}"))?;
         let ct = pqcrypto_mlkem::mlkem768::Ciphertext::from_bytes(enc_key)
             .map_err(|e| format!("Invalid ML-KEM ciphertext: {e}"))?;
-        pqcrypto_mlkem::mlkem768::decapsulate(&ct, &sk).as_bytes().to_vec()
+        pqcrypto_mlkem::mlkem768::decapsulate(&ct, &sk)
+            .as_bytes()
+            .to_vec()
     } else {
         let sk = pqcrypto_mlkem::mlkem1024::SecretKey::from_bytes(priv_key)
             .map_err(|e| format!("Invalid ML-KEM-1024 secret key: {e}"))?;
         let ct = pqcrypto_mlkem::mlkem1024::Ciphertext::from_bytes(enc_key)
             .map_err(|e| format!("Invalid ML-KEM ciphertext: {e}"))?;
-        pqcrypto_mlkem::mlkem1024::decapsulate(&ct, &sk).as_bytes().to_vec()
+        pqcrypto_mlkem::mlkem1024::decapsulate(&ct, &sk)
+            .as_bytes()
+            .to_vec()
     };
 
     let header = build_header(algo_id, enc_key);
@@ -508,7 +628,14 @@ fn mlkem_decrypt(
 
     let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&shared_secret);
     let cipher = Aes256Gcm::new(key);
-    let plaintext = cipher.decrypt(AesNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+    let plaintext = cipher
+        .decrypt(
+            AesNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| format!("AES decryption failed: {e}"))?;
 
     Ok(plaintext)
@@ -554,9 +681,12 @@ fn parse_encrypted(data: &[u8]) -> std::result::Result<(u8, Vec<u8>, Vec<u8>, &[
     Ok((algo_id, enc_key, nonce, body))
 }
 
-fn write_encrypted(path: &std::path::Path, header: &[u8], ciphertext: &[u8]) -> std::result::Result<(), String> {
-    let mut file = std::fs::File::create(path)
-        .map_err(|e| format!("Cannot create output: {e}"))?;
+fn write_encrypted(
+    path: &std::path::Path,
+    header: &[u8],
+    ciphertext: &[u8],
+) -> std::result::Result<(), String> {
+    let mut file = std::fs::File::create(path).map_err(|e| format!("Cannot create output: {e}"))?;
     file.write_all(header)
         .map_err(|e| format!("Cannot write header: {e}"))?;
     file.write_all(ciphertext)
@@ -575,7 +705,11 @@ fn algorithm_to_id(name: &str) -> Result<u8> {
         "rsa-4096-oaep" => ALGO_RSA4096,
         "kyber-768" | "mlkem-768" => ALGO_MLKEM768,
         "kyber-1024" | "mlkem-1024" => ALGO_MLKEM1024,
-        _ => return Err(MCSError::InvalidParams(format!("Unsupported algorithm: {name}"))),
+        _ => {
+            return Err(MCSError::InvalidParams(format!(
+                "Unsupported algorithm: {name}"
+            )));
+        }
     })
 }
 
@@ -587,7 +721,11 @@ fn id_to_algorithm(id: u8) -> Result<String> {
         ALGO_RSA4096 => "rsa-4096-oaep".into(),
         ALGO_MLKEM768 => "mlkem-768".into(),
         ALGO_MLKEM1024 => "mlkem-1024".into(),
-        _ => return Err(MCSError::InvalidParams(format!("Unknown algorithm ID: {id}"))),
+        _ => {
+            return Err(MCSError::InvalidParams(format!(
+                "Unknown algorithm ID: {id}"
+            )));
+        }
     })
 }
 
@@ -600,7 +738,10 @@ fn resolve_crypto_output(
         config.sandbox().resolve_destination_path(out)
     } else {
         let mut result = source.to_path_buf();
-        let name = result.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = result
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         result.set_file_name(format!("{name}.enc"));
         Ok(result)
     }
@@ -614,7 +755,10 @@ fn resolve_decrypt_output(
     if let Some(out) = explicit {
         config.sandbox().resolve_destination_path(out)
     } else {
-        let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let stripped = name.strip_suffix(".enc").unwrap_or(&name);
         let mut result = source.to_path_buf();
         result.set_file_name(stripped);

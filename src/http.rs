@@ -16,7 +16,10 @@ pub struct HttpState {
     pub config: Arc<Config>,
 }
 
-pub async fn create_http_server(config: Arc<Config>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn create_http_server(
+    config: Arc<Config>,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let host = config.server.host.clone();
     let http_state = HttpState { config };
 

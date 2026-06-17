@@ -1,9 +1,9 @@
 use mcp_filesystem::protocol::JsonRpcRequest;
 use mcp_filesystem::server::process_request;
-use serde_json::{json};
+use serde_json::json;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::fs;
 
 static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -68,7 +68,10 @@ async fn test_write_and_read_file() {
 async fn test_read_file_head_tail() {
     let config = test_config();
     let path = t("lines.txt");
-    let content = (1..=100).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+    let content = (1..=100)
+        .map(|i| format!("Line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     fs::write(&path, &content).unwrap();
 
     // Head 3
@@ -173,7 +176,10 @@ async fn test_path_traversal_rejected() {
     let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
     assert!(res.is_err(), "Path traversal should be rejected");
     let err = res.unwrap_err().to_string();
-    assert!(err.contains("not allowed") || err.contains("not found") || err.contains("not in allowed"), "Unexpected error: {err}");
+    assert!(
+        err.contains("not allowed") || err.contains("not found") || err.contains("not in allowed"),
+        "Unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -181,7 +187,10 @@ async fn test_write_to_traversal_rejected() {
     let config = test_config();
     let args = json!({ "path": "../escape.txt", "content": "bad" });
     let res = mcp_filesystem::actions::files::write_file(Some(&args), &config).await;
-    assert!(res.is_err(), "Write outside allowed dirs should be rejected");
+    assert!(
+        res.is_err(),
+        "Write outside allowed dirs should be rejected"
+    );
 }
 
 #[tokio::test]
@@ -204,7 +213,10 @@ async fn test_symlink_component_rejected() {
         // Walking into the symlink should fail (follow_symlinks=false)
         let args = json!({ "path": t("escape_link") });
         let res = mcp_filesystem::actions::files::list_directory(Some(&args), &config).await;
-        assert!(res.is_err(), "Symlink to outside should be rejected when follow_symlinks=false");
+        assert!(
+            res.is_err(),
+            "Symlink to outside should be rejected when follow_symlinks=false"
+        );
         let _ = fs::remove_file(&link);
     }
 }
@@ -300,8 +312,14 @@ async fn test_tar_roundtrip() {
     let args = json!({ "path": &archive, "outputDir": &extracted });
     let res = mcp_filesystem::actions::files::decompress_tar(Some(&args), &config).await;
     assert!(res.is_ok(), "tar decompress failed: {:?}", res.err());
-    assert!(extracted.join("a.txt").exists(), "a.txt should be extracted");
-    assert!(extracted.join("b.txt").exists(), "b.txt should be extracted");
+    assert!(
+        extracted.join("a.txt").exists(),
+        "a.txt should be extracted"
+    );
+    assert!(
+        extracted.join("b.txt").exists(),
+        "b.txt should be extracted"
+    );
 }
 
 // ────────────────────────────
@@ -457,11 +475,15 @@ async fn test_csv_read_pagination() {
         "headers": ["col"],
         "rows": rows,
     });
-    mcp_filesystem::actions::csv::csv_create(Some(&args), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(Some(&args), &config)
+        .await
+        .unwrap();
 
     // Read with limit + offset
     let args = json!({ "path": &path, "limit": 5, "offset": 3 });
-    let res = mcp_filesystem::actions::csv::csv_read(Some(&args), &config).await.unwrap();
+    let res = mcp_filesystem::actions::csv::csv_read(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(res["totalRows"], 20);
     assert_eq!(res["returnedRows"], 5);
     assert_eq!(res["rows"][0][0], "val3");
@@ -471,9 +493,14 @@ async fn test_csv_read_pagination() {
 async fn test_csv_add_row() {
     let config = test_config();
     let path = t("addrow.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X", "Y"],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X", "Y"],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     // Add rows via arrays
     let args = json!({
@@ -493,7 +520,9 @@ async fn test_csv_add_row() {
     assert!(res.is_ok(), "csv_add_row objects failed: {:?}", res.err());
 
     let args = json!({ "path": &path });
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&args), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(val["totalRows"], 3);
     assert_eq!(val["rows"][2][0], "50");
 }
@@ -502,10 +531,15 @@ async fn test_csv_add_row() {
 async fn test_csv_update_cell() {
     let config = test_config();
     let path = t("update.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["A", "B"],
-        "rows": [["old", "value"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["A", "B"],
+            "rows": [["old", "value"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({
         "path": &path, "row": 0, "column": "A", "value": "new",
@@ -513,7 +547,9 @@ async fn test_csv_update_cell() {
     let res = mcp_filesystem::actions::csv::csv_update_cell(Some(&args), &config).await;
     assert!(res.is_ok(), "csv_update_cell failed: {:?}", res.err());
 
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config)
+        .await
+        .unwrap();
     assert_eq!(val["rows"][0][0], "new");
 }
 
@@ -521,16 +557,23 @@ async fn test_csv_update_cell() {
 async fn test_csv_remove_row() {
     let config = test_config();
     let path = t("rmrow.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X"],
-        "rows": [["a"], ["b"], ["c"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X"],
+            "rows": [["a"], ["b"], ["c"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "row": 1 });
     let res = mcp_filesystem::actions::csv::csv_remove_row(Some(&args), &config).await;
     assert!(res.is_ok(), "csv_remove_row failed: {:?}", res.err());
 
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config)
+        .await
+        .unwrap();
     assert_eq!(val["totalRows"], 2);
     assert_eq!(val["rows"][0][0], "a");
     assert_eq!(val["rows"][1][0], "c");
@@ -540,10 +583,15 @@ async fn test_csv_remove_row() {
 async fn test_csv_add_column() {
     let config = test_config();
     let path = t("addcol.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["Name"],
-        "rows": [["Alice"], ["Bob"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["Name"],
+            "rows": [["Alice"], ["Bob"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({
         "path": &path, "column": "Age", "defaultValue": "0",
@@ -551,7 +599,9 @@ async fn test_csv_add_column() {
     let res = mcp_filesystem::actions::csv::csv_add_column(Some(&args), &config).await;
     assert!(res.is_ok(), "csv_add_column failed: {:?}", res.err());
 
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config)
+        .await
+        .unwrap();
     assert_eq!(val["headers"].as_array().unwrap().len(), 2);
     assert_eq!(val["rows"][0][1], "0");
 }
@@ -560,16 +610,23 @@ async fn test_csv_add_column() {
 async fn test_csv_remove_column() {
     let config = test_config();
     let path = t("rmcol.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["A", "B", "C"],
-        "rows": [["1", "2", "3"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["A", "B", "C"],
+            "rows": [["1", "2", "3"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "column": "B" });
     let res = mcp_filesystem::actions::csv::csv_remove_column(Some(&args), &config).await;
     assert!(res.is_ok(), "csv_remove_column failed: {:?}", res.err());
 
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config)
+        .await
+        .unwrap();
     assert_eq!(val["headers"].as_array().unwrap().len(), 2);
     assert_eq!(val["rows"][0].as_array().unwrap().len(), 2);
 }
@@ -578,16 +635,23 @@ async fn test_csv_remove_column() {
 async fn test_csv_rename_column() {
     let config = test_config();
     let path = t("renamecol.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["Old"],
-        "rows": [["data"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["Old"],
+            "rows": [["data"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "oldName": "Old", "newName": "New" });
     let res = mcp_filesystem::actions::csv::csv_rename_column(Some(&args), &config).await;
     assert!(res.is_ok(), "csv_rename_column failed: {:?}", res.err());
 
-    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config).await.unwrap();
+    let val = mcp_filesystem::actions::csv::csv_read(Some(&json!({"path": &path})), &config)
+        .await
+        .unwrap();
     assert_eq!(val["headers"][0], "New");
 }
 
@@ -595,14 +659,24 @@ async fn test_csv_rename_column() {
 async fn test_csv_read_column_values_range_basic() {
     let config = test_config();
     let path = t("colvals.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["Name", "Age"],
-        "rows": [["Alice", "30"], ["Bob", "25"], ["Carol", "35"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["Name", "Age"],
+            "rows": [["Alice", "30"], ["Bob", "25"], ["Carol", "35"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "column": "Name" });
-    let res = mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
-    assert!(res.is_ok(), "csv_read_column_values failed: {:?}", res.err());
+    let res =
+        mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
+    assert!(
+        res.is_ok(),
+        "csv_read_column_values failed: {:?}",
+        res.err()
+    );
     let val = res.unwrap();
     assert_eq!(val["column"], "Name");
     assert_eq!(val["values"].as_array().unwrap().len(), 3);
@@ -615,13 +689,20 @@ async fn test_csv_read_column_values_range_basic() {
 async fn test_csv_read_column_values_range_with_bounds() {
     let config = test_config();
     let path = t("colvals_range.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["Name", "Age"],
-        "rows": [["Alice", "30"], ["Bob", "25"], ["Carol", "35"], ["Dave", "40"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["Name", "Age"],
+            "rows": [["Alice", "30"], ["Bob", "25"], ["Carol", "35"], ["Dave", "40"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "column": "Age", "start": 1, "end": 3 });
-    let res = mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await.unwrap();
+    let res = mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(res["values"].as_array().unwrap().len(), 2);
     assert_eq!(res["values"][0], "25");
     assert_eq!(res["values"][1], "35");
@@ -633,10 +714,15 @@ async fn test_csv_read_column_values_range_with_bounds() {
 async fn test_csv_read_row_range_default() {
     let config = test_config();
     let path = t("readrow.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X", "Y"],
-        "rows": [["a", "1"], ["b", "2"], ["c", "3"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X", "Y"],
+            "rows": [["a", "1"], ["b", "2"], ["c", "3"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path });
     let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config).await;
@@ -653,13 +739,20 @@ async fn test_csv_read_row_range_default() {
 async fn test_csv_read_row_range_with_bounds() {
     let config = test_config();
     let path = t("readrow_range.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X"],
-        "rows": [["r0"], ["r1"], ["r2"], ["r3"], ["r4"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X"],
+            "rows": [["r0"], ["r1"], ["r2"], ["r3"], ["r4"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "start": 2, "end": 4 });
-    let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config).await.unwrap();
+    let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(res["rows"].as_array().unwrap().len(), 2);
     assert_eq!(res["rows"][0][0], "r2");
     assert_eq!(res["rows"][1][0], "r3");
@@ -672,12 +765,18 @@ async fn test_csv_read_column_values_range_exceeds_limit() {
     let config = test_config();
     let path = t("colvals_too_big.csv");
     let rows: Vec<Vec<String>> = (0..1001).map(|i| vec![i.to_string()]).collect();
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["N"], "rows": rows,
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["N"], "rows": rows,
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "column": "N", "start": 0, "end": 1001 });
-    let res = mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
+    let res =
+        mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("Range too large"));
 }
@@ -687,9 +786,14 @@ async fn test_csv_read_row_range_exceeds_limit() {
     let config = test_config();
     let path = t("row_too_big.csv");
     let rows: Vec<Vec<String>> = (0..101).map(|i| vec![i.to_string()]).collect();
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["N"], "rows": rows,
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["N"], "rows": rows,
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "start": 0, "end": 101 });
     let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config).await;
@@ -701,13 +805,19 @@ async fn test_csv_read_row_range_exceeds_limit() {
 async fn test_csv_read_range_invalid_order() {
     let config = test_config();
     let path = t("range_invalid.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X"],
-        "rows": [["a"], ["b"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X"],
+            "rows": [["a"], ["b"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "column": "X", "start": 3, "end": 1 });
-    let res = mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
+    let res =
+        mcp_filesystem::actions::csv::csv_read_column_values_range(Some(&args), &config).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("must be >= start"));
 }
@@ -716,10 +826,15 @@ async fn test_csv_read_range_invalid_order() {
 async fn test_csv_read_row_range_invalid_order() {
     let config = test_config();
     let path = t("row_range_invalid.csv");
-    mcp_filesystem::actions::csv::csv_create(Some(&json!({
-        "path": &path, "headers": ["X"],
-        "rows": [["a"], ["b"]],
-    })), &config).await.unwrap();
+    mcp_filesystem::actions::csv::csv_create(
+        Some(&json!({
+            "path": &path, "headers": ["X"],
+            "rows": [["a"], ["b"]],
+        })),
+        &config,
+    )
+    .await
+    .unwrap();
 
     let args = json!({ "path": &path, "start": 3, "end": 1 });
     let res = mcp_filesystem::actions::csv::csv_read_row_range(Some(&args), &config).await;
@@ -736,7 +851,10 @@ async fn test_delete_directory_non_recursive_fails() {
 
     let args = json!({ "path": &dir, "recursive": false });
     let res = mcp_filesystem::actions::files::delete_directory(Some(&args), &config).await;
-    assert!(res.is_err(), "Non-recursive delete on non-empty dir should fail");
+    assert!(
+        res.is_err(),
+        "Non-recursive delete on non-empty dir should fail"
+    );
 }
 
 #[tokio::test]
@@ -750,7 +868,10 @@ async fn test_compress_tar_source_equals_output_rejected() {
     let archive = dir.join("archive.tar");
     let args = json!({ "source": &dir, "output": &archive });
     let res = mcp_filesystem::actions::files::compress_tar(Some(&args), &config).await;
-    assert!(res.is_err(), "Tar with output inside source dir should be rejected");
+    assert!(
+        res.is_err(),
+        "Tar with output inside source dir should be rejected"
+    );
     let err = res.unwrap_err().to_string();
     assert!(err.contains("not be inside"), "Unexpected error: {err}");
 }
@@ -769,7 +890,10 @@ async fn test_hash_file_sha256() {
     assert!(res.is_ok(), "hash_file failed: {:?}", res.err());
     let val = res.unwrap();
     // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-    assert_eq!(val["hash"], "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    assert_eq!(
+        val["hash"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
 }
 
 #[tokio::test]
@@ -777,7 +901,9 @@ async fn test_hash_file_sha512() {
     let config = test_config();
     fs::write(t("hash_512.txt"), "hello").unwrap();
     let args = json!({ "path": t("hash_512.txt"), "algorithm": "sha512" });
-    let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config).await.unwrap();
+    let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(res["hash"].as_str().unwrap().len(), 128);
 }
 
@@ -786,7 +912,9 @@ async fn test_hash_file_blake3() {
     let config = test_config();
     fs::write(t("hash_b3.txt"), "hello").unwrap();
     let args = json!({ "path": t("hash_b3.txt"), "algorithm": "blake3" });
-    let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config).await.unwrap();
+    let res = mcp_filesystem::actions::files::hash_file(Some(&args), &config)
+        .await
+        .unwrap();
     assert_eq!(res["hash"].as_str().unwrap().len(), 64);
 }
 
@@ -838,7 +966,10 @@ async fn test_create_existing_file_without_overwrite_fails() {
 
     let args = json!({ "path": &path, "headers": ["a"], "overwrite": false });
     let res = mcp_filesystem::actions::csv::csv_create(Some(&args), &config).await;
-    assert!(res.is_err(), "Creating existing file without overwrite should fail");
+    assert!(
+        res.is_err(),
+        "Creating existing file without overwrite should fail"
+    );
 }
 
 #[tokio::test]
@@ -952,7 +1083,11 @@ async fn test_readonly_mode_allows_read() {
     };
 
     let res = process_request(&req, &config).await;
-    assert!(res.is_ok(), "Read should succeed in read-only mode: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "Read should succeed in read-only mode: {:?}",
+        res.err()
+    );
 }
 
 #[tokio::test]
@@ -969,7 +1104,11 @@ async fn test_readonly_mode_allows_tools_list() {
     assert!(res.is_ok(), "tools/list should always succeed");
 }
 
-async fn csv_dispatch(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
+async fn csv_dispatch(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         method: "tools/call".into(),
@@ -979,12 +1118,25 @@ async fn csv_dispatch(config: &mcp_filesystem::config::Config, name: &str, args:
     process_request(&req, config).await
 }
 
-async fn csv_dispatch_ok(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> serde_json::Value {
-    csv_dispatch(config, name, args).await.expect(&format!("{name} via dispatch failed"))
+async fn csv_dispatch_ok(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    csv_dispatch(config, name, args)
+        .await
+        .expect(&format!("{name} via dispatch failed"))
 }
 
-async fn csv_dispatch_err(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> String {
-    csv_dispatch(config, name, args).await.unwrap_err().to_string()
+async fn csv_dispatch_err(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> String {
+    csv_dispatch(config, name, args)
+        .await
+        .unwrap_err()
+        .to_string()
 }
 
 #[tokio::test]
@@ -994,10 +1146,15 @@ async fn test_csv_all_tools_via_dispatch() {
 
     // 1. csv_create
     let path = format!("{dir}/csv_all_dispatch.csv");
-    let val = csv_dispatch_ok(&config, "csv_create", json!({
-        "path": &path, "headers": ["Name", "Age", "City"],
-        "rows": [["Alice", "30", "NYC"], ["Bob", "25", "SF"]],
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_create",
+        json!({
+            "path": &path, "headers": ["Name", "Age", "City"],
+            "rows": [["Alice", "30", "NYC"], ["Bob", "25", "SF"]],
+        }),
+    )
+    .await;
     assert_eq!(val["rowsCreated"], 2);
 
     // 2. csv_read
@@ -1007,55 +1164,100 @@ async fn test_csv_all_tools_via_dispatch() {
     assert_eq!(val["rows"][0][0], "Alice");
 
     // 3. csv_add_row (array format)
-    let val = csv_dispatch_ok(&config, "csv_add_row", json!({
-        "path": &path, "rows": [["Carol", "35", "LA"]],
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_add_row",
+        json!({
+            "path": &path, "rows": [["Carol", "35", "LA"]],
+        }),
+    )
+    .await;
     assert_eq!(val["rowsAdded"], 1);
     assert_eq!(val["totalRows"], 3);
 
     // 4. csv_update_cell
-    let val = csv_dispatch_ok(&config, "csv_update_cell", json!({
-        "path": &path, "row": 0, "column": "Age", "value": "31",
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_update_cell",
+        json!({
+            "path": &path, "row": 0, "column": "Age", "value": "31",
+        }),
+    )
+    .await;
     assert_eq!(val["value"], "31");
 
     // 5. csv_read_column_values_range
-    let val = csv_dispatch_ok(&config, "csv_read_column_values_range", json!({
-        "path": &path, "column": "Name",
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_read_column_values_range",
+        json!({
+            "path": &path, "column": "Name",
+        }),
+    )
+    .await;
     assert_eq!(val["column"], "Name");
     assert_eq!(val["values"].as_array().unwrap().len(), 3);
 
     // 6. csv_read_row_range
-    let val = csv_dispatch_ok(&config, "csv_read_row_range", json!({
-        "path": &path, "start": 0, "end": 2,
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_read_row_range",
+        json!({
+            "path": &path, "start": 0, "end": 2,
+        }),
+    )
+    .await;
     assert_eq!(val["rows"].as_array().unwrap().len(), 2);
 
     // 7. csv_add_column
-    let val = csv_dispatch_ok(&config, "csv_add_column", json!({
-        "path": &path, "column": "Salary", "defaultValue": "0",
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_add_column",
+        json!({
+            "path": &path, "column": "Salary", "defaultValue": "0",
+        }),
+    )
+    .await;
     assert_eq!(val["column"], "Salary");
 
     // 8. csv_rename_column
-    csv_dispatch_ok(&config, "csv_rename_column", json!({
-        "path": &path, "oldName": "Salary", "newName": "Income",
-    })).await;
+    csv_dispatch_ok(
+        &config,
+        "csv_rename_column",
+        json!({
+            "path": &path, "oldName": "Salary", "newName": "Income",
+        }),
+    )
+    .await;
     // verify via read
     let val = csv_dispatch_ok(&config, "csv_read", json!({ "path": &path })).await;
-    assert!(val["headers"].as_array().unwrap().contains(&json!("Income")));
+    assert!(
+        val["headers"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Income"))
+    );
 
     // 9. csv_remove_column
-    let val = csv_dispatch_ok(&config, "csv_remove_column", json!({
-        "path": &path, "column": "Income",
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_remove_column",
+        json!({
+            "path": &path, "column": "Income",
+        }),
+    )
+    .await;
     assert_eq!(val["removedColumn"], "Income");
 
     // 10. csv_select_column_range (SQL SELECT-like)
-    let val = csv_dispatch_ok(&config, "csv_select_column_range", json!({
-        "path": &path, "columns": ["Name", "City"],
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_select_column_range",
+        json!({
+            "path": &path, "columns": ["Name", "City"],
+        }),
+    )
+    .await;
     assert_eq!(val["columns"], json!(["Name", "City"]));
     assert_eq!(val["rows"][0], json!(["Alice", "NYC"]));
     assert_eq!(val["rows"][1], json!(["Bob", "SF"]));
@@ -1063,36 +1265,61 @@ async fn test_csv_all_tools_via_dispatch() {
     assert_eq!(val["totalRows"], 3);
 
     // csv_select_column_range with range
-    let val = csv_dispatch_ok(&config, "csv_select_column_range", json!({
-        "path": &path, "columns": ["Name"], "start": 1, "end": 3,
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_select_column_range",
+        json!({
+            "path": &path, "columns": ["Name"], "start": 1, "end": 3,
+        }),
+    )
+    .await;
     assert_eq!(val["rows"].as_array().unwrap().len(), 2);
     assert_eq!(val["rows"][0], json!(["Bob"]));
 
     // 11. csv_remove_row
-    let val = csv_dispatch_ok(&config, "csv_remove_row", json!({
-        "path": &path, "row": 0,
-    })).await;
+    let val = csv_dispatch_ok(
+        &config,
+        "csv_remove_row",
+        json!({
+            "path": &path, "row": 0,
+        }),
+    )
+    .await;
     assert_eq!(val["removedRowIndex"], 0);
 
     // Unknown CSV tool rejected at dispatch
     let err = csv_dispatch_err(&config, "csv_nonexistent_tool", json!({})).await;
-    assert!(err.contains("not found"), "Unknown tool should be rejected: {err}");
+    assert!(
+        err.contains("not found"),
+        "Unknown tool should be rejected: {err}"
+    );
 
     // Write tool blocked in readonly mode at dispatch
     let mut ro_config = test_config();
     ro_config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
-    let err = csv_dispatch_err(&ro_config, "csv_create", json!({
-        "path": &path, "headers": ["X"],
-    })).await;
-    assert!(err.contains("not allowed in read-only mode"), "Write CSV in readonly should be rejected: {err}");
+    let err = csv_dispatch_err(
+        &ro_config,
+        "csv_create",
+        json!({
+            "path": &path, "headers": ["X"],
+        }),
+    )
+    .await;
+    assert!(
+        err.contains("not allowed in read-only mode"),
+        "Write CSV in readonly should be rejected: {err}"
+    );
 }
 
 // ──────────────────────────────────────────
 //  Full Dispatch Tests (all tools through tools/call)
 // ──────────────────────────────────────────
 
-async fn dispatch_call(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> std::result::Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
+async fn dispatch_call(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> std::result::Result<serde_json::Value, mcp_filesystem::errors::MCSError> {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         method: "tools/call".into(),
@@ -1102,12 +1329,25 @@ async fn dispatch_call(config: &mcp_filesystem::config::Config, name: &str, args
     process_request(&req, config).await
 }
 
-async fn dispatch_ok(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> serde_json::Value {
-    dispatch_call(config, name, args).await.unwrap_or_else(|e| panic!("{name} via dispatch failed: {e}"))
+async fn dispatch_ok(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    dispatch_call(config, name, args)
+        .await
+        .unwrap_or_else(|e| panic!("{name} via dispatch failed: {e}"))
 }
 
-async fn dispatch_err(config: &mcp_filesystem::config::Config, name: &str, args: serde_json::Value) -> String {
-    dispatch_call(config, name, args).await.unwrap_err().to_string()
+async fn dispatch_err(
+    config: &mcp_filesystem::config::Config,
+    name: &str,
+    args: serde_json::Value,
+) -> String {
+    dispatch_call(config, name, args)
+        .await
+        .unwrap_err()
+        .to_string()
 }
 
 #[tokio::test]
@@ -1127,28 +1367,57 @@ async fn test_all_file_tools_via_dispatch() {
     assert_eq!(val["totalLines"], 3);
 
     // 2. read_text_file with head
-    let val = dispatch_ok(&config, "read_text_file", json!({ "path": d("hello.txt"), "head": 2 })).await;
+    let val = dispatch_ok(
+        &config,
+        "read_text_file",
+        json!({ "path": d("hello.txt"), "head": 2 }),
+    )
+    .await;
     assert_eq!(val["content"], "Hello, World!\nLine 2");
 
     // 3. read_text_file with tail
-    let val = dispatch_ok(&config, "read_text_file", json!({ "path": d("hello.txt"), "tail": 1 })).await;
+    let val = dispatch_ok(
+        &config,
+        "read_text_file",
+        json!({ "path": d("hello.txt"), "tail": 1 }),
+    )
+    .await;
     assert_eq!(val["content"], "Line 3");
 
     // 4. read_media_file (binary format)
-    let val = dispatch_ok(&config, "read_media_file", json!({ "path": d("hello.txt") })).await;
-    assert!(val["mimeType"].as_str().unwrap().contains("text/") || val["mimeType"].as_str().unwrap() == "inode/x-empty" || !val["mimeType"].as_str().unwrap().is_empty());
+    let val = dispatch_ok(
+        &config,
+        "read_media_file",
+        json!({ "path": d("hello.txt") }),
+    )
+    .await;
+    assert!(
+        val["mimeType"].as_str().unwrap().contains("text/")
+            || val["mimeType"].as_str().unwrap() == "inode/x-empty"
+            || !val["mimeType"].as_str().unwrap().is_empty()
+    );
 
     // 5. write_file
-    dispatch_ok(&config, "write_file", json!({
-        "path": d("written.txt"), "content": "written content",
-    })).await;
+    dispatch_ok(
+        &config,
+        "write_file",
+        json!({
+            "path": d("written.txt"), "content": "written content",
+        }),
+    )
+    .await;
     assert!(p("written.txt").exists());
 
     // 6. edit_file
-    dispatch_ok(&config, "edit_file", json!({
-        "path": d("hello.txt"),
-        "edits": [{"oldText": "World", "newText": "Rust"}],
-    })).await;
+    dispatch_ok(
+        &config,
+        "edit_file",
+        json!({
+            "path": d("hello.txt"),
+            "edits": [{"oldText": "World", "newText": "Rust"}],
+        }),
+    )
+    .await;
     let content = fs::read_to_string(p("hello.txt")).unwrap();
     assert!(content.contains("Hello, Rust!"));
 
@@ -1159,24 +1428,43 @@ async fn test_all_file_tools_via_dispatch() {
     // 8. list_directory
     let val = dispatch_ok(&config, "list_directory", json!({ "path": d("") })).await;
     let entries = val["entries"].as_array().unwrap();
-    assert!(entries.iter().any(|e| e.as_str().unwrap().contains("hello.txt")));
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("hello.txt"))
+    );
 
     // 9. list_directory_with_sizes
-    let val = dispatch_ok(&config, "list_directory_with_sizes", json!({ "path": d("") })).await;
+    let val = dispatch_ok(
+        &config,
+        "list_directory_with_sizes",
+        json!({ "path": d("") }),
+    )
+    .await;
     assert!(val["summary"]["totalFiles"].as_u64().unwrap() > 0);
 
     // 10. move_file
     fs::write(p("move_src.txt"), "move me").unwrap();
-    dispatch_ok(&config, "move_file", json!({
-        "source": d("move_src.txt"), "destination": d("move_dst.txt"),
-    })).await;
+    dispatch_ok(
+        &config,
+        "move_file",
+        json!({
+            "source": d("move_src.txt"), "destination": d("move_dst.txt"),
+        }),
+    )
+    .await;
     assert!(!p("move_src.txt").exists());
     assert!(p("move_dst.txt").exists());
 
     // 11. copy_file
-    dispatch_ok(&config, "copy_file", json!({
-        "source": d("move_dst.txt"), "destination": d("copy_dst.txt"),
-    })).await;
+    dispatch_ok(
+        &config,
+        "copy_file",
+        json!({
+            "source": d("move_dst.txt"), "destination": d("copy_dst.txt"),
+        }),
+    )
+    .await;
     assert!(p("copy_dst.txt").exists());
 
     // 12. delete_file
@@ -1186,13 +1474,23 @@ async fn test_all_file_tools_via_dispatch() {
     // 13. delete_directory (recursive)
     fs::create_dir_all(p("del_dir/sub")).unwrap();
     fs::write(p("del_dir/sub/f.txt"), "x").unwrap();
-    dispatch_ok(&config, "delete_directory", json!({ "path": d("del_dir"), "recursive": true })).await;
+    dispatch_ok(
+        &config,
+        "delete_directory",
+        json!({ "path": d("del_dir"), "recursive": true }),
+    )
+    .await;
     assert!(!p("del_dir").exists());
 
     // 14. search_files
-    let val = dispatch_ok(&config, "search_files", json!({
-        "path": d(""), "pattern": "*.txt",
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "search_files",
+        json!({
+            "path": d(""), "pattern": "*.txt",
+        }),
+    )
+    .await;
     assert!(val["count"].as_u64().unwrap() > 0);
 
     // 15. directory_tree
@@ -1209,23 +1507,38 @@ async fn test_all_file_tools_via_dispatch() {
     assert!(!val["directories"].as_array().unwrap().is_empty());
 
     // 18. hash_file
-    let val = dispatch_ok(&config, "hash_file", json!({
-        "path": d("hello.txt"), "algorithm": "sha256",
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "hash_file",
+        json!({
+            "path": d("hello.txt"), "algorithm": "sha256",
+        }),
+    )
+    .await;
     assert_eq!(val["hash"].as_str().unwrap().len(), 64);
 
     // 19. grep_files
-    let val = dispatch_ok(&config, "grep_files", json!({
-        "path": d(""), "pattern": "Rust",
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "grep_files",
+        json!({
+            "path": d(""), "pattern": "Rust",
+        }),
+    )
+    .await;
     assert!(val["count"].as_u64().unwrap() > 0);
 
     // 20. set_permissions
     #[cfg(unix)]
     {
-        dispatch_ok(&config, "set_permissions", json!({
-            "path": d("hello.txt"), "mode": "644",
-        })).await;
+        dispatch_ok(
+            &config,
+            "set_permissions",
+            json!({
+                "path": d("hello.txt"), "mode": "644",
+            }),
+        )
+        .await;
     }
 
     // 21. get_disk_usage
@@ -1235,15 +1548,25 @@ async fn test_all_file_tools_via_dispatch() {
     // 22. create_symlink
     #[cfg(unix)]
     {
-        dispatch_ok(&config, "create_symlink", json!({
-            "source": d("hello.txt"), "linkPath": d("my_link.txt"),
-        })).await;
+        dispatch_ok(
+            &config,
+            "create_symlink",
+            json!({
+                "source": d("hello.txt"), "linkPath": d("my_link.txt"),
+            }),
+        )
+        .await;
     }
 
     // 23. read_file_range
-    let val = dispatch_ok(&config, "read_file_range", json!({
-        "path": d("hello.txt"), "offset": 7, "length": 4,
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "read_file_range",
+        json!({
+            "path": d("hello.txt"), "offset": 7, "length": 4,
+        }),
+    )
+    .await;
     assert_eq!(val["content"], "Rust");
 
     // 24. compress_gzip
@@ -1251,7 +1574,12 @@ async fn test_all_file_tools_via_dispatch() {
     assert!(val["compressedSize"].as_u64().unwrap() > 0);
 
     // 25. decompress_gzip
-    let val = dispatch_ok(&config, "decompress_gzip", json!({ "path": d("hello.txt.gz") })).await;
+    let val = dispatch_ok(
+        &config,
+        "decompress_gzip",
+        json!({ "path": d("hello.txt.gz") }),
+    )
+    .await;
     assert!(val["decompressedSize"].as_u64().unwrap() > 0);
 
     // 26. compress_zstd
@@ -1259,20 +1587,35 @@ async fn test_all_file_tools_via_dispatch() {
     assert!(p("hello.txt.zst").exists());
 
     // 27. decompress_zstd
-    let val = dispatch_ok(&config, "decompress_zstd", json!({ "path": d("hello.txt.zst") })).await;
+    let val = dispatch_ok(
+        &config,
+        "decompress_zstd",
+        json!({ "path": d("hello.txt.zst") }),
+    )
+    .await;
     assert!(val["decompressedSize"].as_u64().unwrap() > 0);
 
     // 28. compress_tar + 29. decompress_tar
     fs::write(p("new_dir/afile.txt"), "content").unwrap();
     let tar_out = p("archive.tar.gz");
-    dispatch_ok(&config, "compress_tar", json!({
-        "source": d("new_dir"), "output": d("archive.tar.gz"), "compression": "gzip",
-    })).await;
+    dispatch_ok(
+        &config,
+        "compress_tar",
+        json!({
+            "source": d("new_dir"), "output": d("archive.tar.gz"), "compression": "gzip",
+        }),
+    )
+    .await;
     assert!(tar_out.exists());
     let extract_out = p("extracted");
-    let val = dispatch_ok(&config, "decompress_tar", json!({
-        "path": &tar_out, "outputDir": &extract_out,
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "decompress_tar",
+        json!({
+            "path": &tar_out, "outputDir": &extract_out,
+        }),
+    )
+    .await;
     assert!(val["extracted"].as_u64().unwrap() > 0);
 
     // Unknown tool rejected
@@ -1282,9 +1625,14 @@ async fn test_all_file_tools_via_dispatch() {
     // Write tool blocked in readonly
     let mut ro_config = test_config();
     ro_config.server.access_mode = mcp_filesystem::config::AccessMode::ReadOnly;
-    let err = dispatch_err(&ro_config, "write_file", json!({
-        "path": d("nope.txt"), "content": "x",
-    })).await;
+    let err = dispatch_err(
+        &ro_config,
+        "write_file",
+        json!({
+            "path": d("nope.txt"), "content": "x",
+        }),
+    )
+    .await;
     assert!(err.contains("not allowed in read-only mode"));
 }
 
@@ -1305,19 +1653,29 @@ async fn test_all_crypto_tools_via_dispatch() {
     assert_eq!(aes_key.len(), 64);
 
     // 2. encrypt_file (AES-256-GCM)
-    let val = dispatch_ok(&config, "encrypt_file", json!({
-        "path": d("plain.txt"),
-        "algorithm": "aes-256-gcm",
-        "key": &aes_key,
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "encrypt_file",
+        json!({
+            "path": d("plain.txt"),
+            "algorithm": "aes-256-gcm",
+            "key": &aes_key,
+        }),
+    )
+    .await;
     assert!(p("plain.txt.enc").exists());
     assert_eq!(val["algorithm"], "aes-256-gcm");
 
     // 3. decrypt_file (AES-256-GCM)
-    let val = dispatch_ok(&config, "decrypt_file", json!({
-        "path": d("plain.txt.enc"),
-        "key": &aes_key,
-    })).await;
+    let val = dispatch_ok(
+        &config,
+        "decrypt_file",
+        json!({
+            "path": d("plain.txt.enc"),
+            "key": &aes_key,
+        }),
+    )
+    .await;
     assert_eq!(val["algorithm"], "aes-256-gcm");
 
     let decrypted = fs::read_to_string(p("plain.txt")).unwrap();
@@ -1330,18 +1688,28 @@ async fn test_all_crypto_tools_via_dispatch() {
 
     // 5. encrypt_file (RSA)
     fs::write(p("rsa_plain.txt"), "RSA secret!").unwrap();
-    dispatch_ok(&config, "encrypt_file", json!({
-        "path": d("rsa_plain.txt"),
-        "algorithm": "rsa-2048-oaep",
-        "publicKey": &pub_key,
-    })).await;
+    dispatch_ok(
+        &config,
+        "encrypt_file",
+        json!({
+            "path": d("rsa_plain.txt"),
+            "algorithm": "rsa-2048-oaep",
+            "publicKey": &pub_key,
+        }),
+    )
+    .await;
     assert!(p("rsa_plain.txt.enc").exists());
 
     // 6. decrypt_file (RSA)
-    dispatch_ok(&config, "decrypt_file", json!({
-        "path": d("rsa_plain.txt.enc"),
-        "privateKey": &priv_key,
-    })).await;
+    dispatch_ok(
+        &config,
+        "decrypt_file",
+        json!({
+            "path": d("rsa_plain.txt.enc"),
+            "privateKey": &priv_key,
+        }),
+    )
+    .await;
     let decrypted = fs::read_to_string(p("rsa_plain.txt")).unwrap();
     assert_eq!(decrypted, "RSA secret!");
 
@@ -1349,22 +1717,40 @@ async fn test_all_crypto_tools_via_dispatch() {
     let val = dispatch_ok(&config, "generate_key", json!({ "algorithm": "aes-256" })).await;
     let chacha_key = val["key"].as_str().unwrap().to_string();
     fs::write(p("chacha_plain.txt"), "ChaCha secret!").unwrap();
-    dispatch_ok(&config, "encrypt_file", json!({
-        "path": d("chacha_plain.txt"),
-        "algorithm": "chacha20-poly1305",
-        "key": &chacha_key,
-    })).await;
-    dispatch_ok(&config, "decrypt_file", json!({
-        "path": d("chacha_plain.txt.enc"),
-        "key": &chacha_key,
-    })).await;
-    assert_eq!(fs::read_to_string(p("chacha_plain.txt")).unwrap(), "ChaCha secret!");
+    dispatch_ok(
+        &config,
+        "encrypt_file",
+        json!({
+            "path": d("chacha_plain.txt"),
+            "algorithm": "chacha20-poly1305",
+            "key": &chacha_key,
+        }),
+    )
+    .await;
+    dispatch_ok(
+        &config,
+        "decrypt_file",
+        json!({
+            "path": d("chacha_plain.txt.enc"),
+            "key": &chacha_key,
+        }),
+    )
+    .await;
+    assert_eq!(
+        fs::read_to_string(p("chacha_plain.txt")).unwrap(),
+        "ChaCha secret!"
+    );
 
     // generate_key with key file output
-    dispatch_ok(&config, "generate_key", json!({
-        "algorithm": "aes-256",
-        "output": d("saved.key"),
-    })).await;
+    dispatch_ok(
+        &config,
+        "generate_key",
+        json!({
+            "algorithm": "aes-256",
+            "output": d("saved.key"),
+        }),
+    )
+    .await;
     assert!(p("saved.key").exists());
 }
 
@@ -1415,7 +1801,10 @@ async fn test_write_to_symlink_outside_allowed_rejected() {
         let target = link.join("evil.txt");
         let args = json!({ "path": &target, "content": "pwned" });
         let res = mcp_filesystem::actions::files::write_file(Some(&args), &config).await;
-        assert!(res.is_err(), "Write through symlink to outside should be rejected");
+        assert!(
+            res.is_err(),
+            "Write through symlink to outside should be rejected"
+        );
 
         let _ = fs::remove_dir_all(&outside);
     }
@@ -1426,7 +1815,8 @@ async fn test_destination_symlink_parent_directory_rejected() {
     let config = test_config();
     #[cfg(unix)]
     {
-        let outside = std::env::temp_dir().join(format!("mcp_fs_parent_link_{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("mcp_fs_parent_link_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
 
         // Symlink a directory inside allowed -> outside
@@ -1437,7 +1827,10 @@ async fn test_destination_symlink_parent_directory_rejected() {
         let target = linked_dir.join("child.txt");
         let args = json!({ "path": &target, "content": "data" });
         let res = mcp_filesystem::actions::files::write_file(Some(&args), &config).await;
-        assert!(res.is_err(), "Write through symlinked parent directory should be rejected");
+        assert!(
+            res.is_err(),
+            "Write through symlinked parent directory should be rejected"
+        );
 
         let _ = fs::remove_dir_all(&outside);
     }
@@ -1451,7 +1844,8 @@ async fn test_rename_to_symlink_target_rejected() {
         let src = test_dir().join("rename_src.txt");
         fs::write(&src, "source data").unwrap();
 
-        let outside = std::env::temp_dir().join(format!("mcp_fs_rename_tgt_{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("mcp_fs_rename_tgt_{}", std::process::id()));
         fs::write(&outside, "target data").unwrap();
 
         let link = test_dir().join("rename_link_target");
@@ -1463,7 +1857,10 @@ async fn test_rename_to_symlink_target_rejected() {
             "destination": &link
         });
         let res = mcp_filesystem::actions::files::move_file(Some(&args), &config).await;
-        assert!(res.is_err(), "Rename to symlink pointing outside should be rejected");
+        assert!(
+            res.is_err(),
+            "Rename to symlink pointing outside should be rejected"
+        );
 
         let _ = fs::remove_file(&outside);
     }
@@ -1477,7 +1874,8 @@ async fn test_copy_to_symlink_outside_rejected() {
         let src = test_dir().join("copy_src.txt");
         fs::write(&src, "source data").unwrap();
 
-        let outside = std::env::temp_dir().join(format!("mcp_fs_copy_outside_{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("mcp_fs_copy_outside_{}", std::process::id()));
         fs::write(&outside, "outside data").unwrap();
 
         let link = test_dir().join("copy_link_dest");
@@ -1488,7 +1886,10 @@ async fn test_copy_to_symlink_outside_rejected() {
             "destination": &link
         });
         let res = mcp_filesystem::actions::files::copy_file(Some(&args), &config).await;
-        assert!(res.is_err(), "Copy to symlink pointing outside should be rejected");
+        assert!(
+            res.is_err(),
+            "Copy to symlink pointing outside should be rejected"
+        );
 
         let _ = fs::remove_file(&outside);
     }
@@ -1522,8 +1923,14 @@ async fn test_sandbox_absolute_outside_allowed_rejected() {
     let path = "/etc/passwd";
     let args = json!({ "path": path });
     let res = mcp_filesystem::actions::files::read_text_file(Some(&args), &config).await;
-    assert!(res.is_err(), "Absolute path outside allowed dir should be rejected");
+    assert!(
+        res.is_err(),
+        "Absolute path outside allowed dir should be rejected"
+    );
     if let Err(e) = &res {
-        assert!(matches!(e, mcp_filesystem::errors::MCSError::PathNotAllowed(_)));
+        assert!(matches!(
+            e,
+            mcp_filesystem::errors::MCSError::PathNotAllowed(_)
+        ));
     }
 }
