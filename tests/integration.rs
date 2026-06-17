@@ -428,6 +428,48 @@ async fn test_mlkem1024_encrypt_decrypt_roundtrip() {
     .await;
 }
 
+// RSA was removed in v1.4.0 (deprecated by CNSA 2.0 / NIST IR 8547). These guard
+// that the removed algorithms are rejected cleanly — never silently accepted, and
+// never a panic — including a legacy on-disk file that used the old RSA algo id.
+#[tokio::test]
+async fn test_rsa_algorithms_removed_clean_error() {
+    let config = test_config();
+    fs::write(t("rsa_gone.txt"), "data").unwrap();
+
+    let args = json!({ "path": t("rsa_gone.txt"), "algorithm": "rsa-2048-oaep", "publicKey": "ab" });
+    let res = mcp_filesystem::actions::crypto::encrypt_file(Some(&args), &config).await;
+    assert!(res.is_err(), "rsa-2048-oaep must be rejected after removal");
+
+    let args = json!({ "path": t("rsa_gone.txt"), "algorithm": "rsa-4096-oaep", "publicKey": "ab" });
+    let res = mcp_filesystem::actions::crypto::encrypt_file(Some(&args), &config).await;
+    assert!(res.is_err(), "rsa-4096-oaep must be rejected after removal");
+
+    for algo in ["rsa-2048", "rsa-4096"] {
+        let args = json!({ "algorithm": algo });
+        let res = mcp_filesystem::actions::crypto::generate_key(Some(&args), &config).await;
+        assert!(res.is_err(), "{algo} keygen must be rejected after removal");
+    }
+}
+
+#[tokio::test]
+async fn test_decrypt_legacy_rsa_file_errors_cleanly() {
+    // A v1.x MCPE file whose header used the now-removed RSA algorithm id (3)
+    // must return a clean error, not panic.
+    let config = test_config();
+    let mut data = Vec::new();
+    data.extend_from_slice(b"MCPE"); // magic
+    data.push(1); // version
+    data.push(3); // algo_id 3 == legacy RSA-2048
+    data.extend_from_slice(&0u16.to_be_bytes()); // key_len = 0
+    data.extend_from_slice(&[0u8; 12]); // nonce
+    data.extend_from_slice(&[0u8; 16]); // body
+    fs::write(t("legacy_rsa.enc"), &data).unwrap();
+
+    let args = json!({ "path": t("legacy_rsa.enc"), "privateKey": "00" });
+    let res = mcp_filesystem::actions::crypto::decrypt_file(Some(&args), &config).await;
+    assert!(res.is_err(), "legacy RSA-id file must error cleanly");
+}
+
 #[tokio::test]
 async fn test_encrypt_wrong_key_fails() {
     let config = test_config();
