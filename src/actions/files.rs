@@ -195,13 +195,43 @@ pub async fn read_media_file(args: Option<&Value>, config: &Config) -> Result<Va
 
     let encoded = base64_simd::STANDARD.encode_to_string(&data);
 
-    Ok(json!({
-        "content": encoded,
-        "mimeType": mime_type,
-        "detectedType": detected_mime,
-        "size": file_size,
-        "path": valid_path.to_string_lossy(),
-    }))
+    // Return spec-compliant typed content: ImageContent/AudioContent for
+    // recognised media, otherwise a text note with the base64 in structuredContent.
+    let kind = if mime_type.starts_with("image/") {
+        "image"
+    } else if mime_type.starts_with("audio/") {
+        "audio"
+    } else {
+        ""
+    };
+
+    if kind.is_empty() {
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Binary file ({mime_type}, {file_size} bytes); base64 data in structuredContent.data"
+                )
+            }],
+            "structuredContent": {
+                "data": encoded,
+                "mimeType": mime_type,
+                "detectedType": detected_mime,
+                "size": file_size,
+                "path": valid_path.to_string_lossy(),
+            },
+            "isError": false
+        }))
+    } else {
+        Ok(json!({
+            "content": [{
+                "type": kind,
+                "data": encoded,
+                "mimeType": mime_type,
+            }],
+            "isError": false
+        }))
+    }
 }
 
 pub async fn write_file(args: Option<&Value>, config: &Config) -> Result<Value> {

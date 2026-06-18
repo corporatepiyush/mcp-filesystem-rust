@@ -324,22 +324,83 @@ fn timeout_error(config: &Config) -> MCSError {
     ))
 }
 
-fn handle_initialize(_req: &JsonRpcRequest) -> MCSResult<Value> {
-    static INIT_RESPONSE: LazyLock<Value> = LazyLock::new(|| {
+/// MCP protocol revisions this server can speak, newest first (for `initialize`
+/// version negotiation).
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// Newest revision we implement; offered when the client requests an unknown one.
+const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// `instructions` surfaced to the client and appended to the model's system prompt.
+const SERVER_INSTRUCTIONS: &str = "Sandboxed filesystem MCP server. All paths are restricted to the \
+allowed directories; use `list_allowed_directories` to see them. Call `create_directory` before \
+writing into a new path. Tool results carry both human-readable text and a machine-readable \
+`structuredContent` object; `read_media_file` returns base64 image/binary content. Tool failures are \
+returned with `isError: true` rather than as protocol errors — read the message and retry.";
+
+fn handle_initialize(req: &JsonRpcRequest) -> MCSResult<Value> {
+    // Version negotiation: echo a supported requested revision, else offer latest.
+    let protocol_version = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+        .unwrap_or(LATEST_PROTOCOL_VERSION);
+
+    Ok(json!({
+        "protocolVersion": protocol_version,
+        // Advertise only implemented capabilities. Earlier releases falsely
+        // declared `resources` and `prompts` with no handlers.
+        "capabilities": {
+            "tools": { "listChanged": false }
+        },
+        "serverInfo": {
+            "name": "mcp-filesystem",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "instructions": SERVER_INSTRUCTIONS
+    }))
+}
+
+/// Wrap a successful tool result in an MCP `CallToolResult`. If the action
+/// already produced a `CallToolResult` (an object with a `content` array — e.g.
+/// `read_media_file` returning `ImageContent`), it is passed through with
+/// `isError` defaulted. Otherwise the value is provided as serialized text plus,
+/// for objects, `structuredContent` (MCP 2025-06-18+).
+#[inline]
+fn tool_success(value: Value) -> Value {
+    if value.get("content").is_some_and(Value::is_array) {
+        let mut v = value;
+        if v.get("isError").is_none() {
+            v["isError"] = Value::Bool(false);
+        }
+        return v;
+    }
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
+    if value.is_object() {
         json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": { "listChanged": false },
-                "resources": { "subscribe": false, "listChanged": false },
-                "prompts": { "listChanged": false }
-            },
-            "serverInfo": {
-                "name": "mcp-filesystem",
-                "version": env!("CARGO_PKG_VERSION")
-            }
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": value,
+            "isError": false
         })
-    });
-    Ok(INIT_RESPONSE.clone())
+    } else {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false
+        })
+    }
+}
+
+/// Wrap a tool execution failure as a `CallToolResult` with `isError: true` so
+/// the model can read the message and self-correct instead of receiving an
+/// opaque JSON-RPC protocol error.
+#[inline]
+fn tool_error(message: impl Into<String>) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": message.into() }],
+        "isError": true
+    })
 }
 
 fn handle_tools_list() -> MCSResult<Value> {
@@ -358,7 +419,8 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
     if config.server.access_mode == crate::config::AccessMode::ReadOnly
         && crate::tools::is_write_tool(tool_name)
     {
-        return Err(MCSError::InvalidParams(format!(
+        // Policy rejection of a valid call → surface as an isError result.
+        return Ok(tool_error(format!(
             "Operation '{tool_name}' is not allowed in read-only mode"
         )));
     }
@@ -418,10 +480,15 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         tool => Err(method_not_found(tool)),
     };
 
-    if let Err(ref e) = result {
-        error!("Tool '{}' error: {:?}", tool_name, e);
+    // Wrap in an MCP `CallToolResult`. Execution failures become isError
+    // results so the model can self-correct, not opaque protocol errors.
+    match result {
+        Ok(value) => Ok(tool_success(value)),
+        Err(e) => {
+            error!("Tool '{tool_name}' error: {e:?}");
+            Ok(tool_error(e.to_string()))
+        }
     }
-    result
 }
 
 fn method_not_found(name: &str) -> MCSError {
@@ -484,7 +551,42 @@ mod tests {
             id: Some(Value::Number(1.into())),
         };
         let result = handle_initialize(&req).unwrap();
-        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["protocolVersion"], LATEST_PROTOCOL_VERSION);
+        // False resources/prompts capabilities must not be advertised.
+        assert!(result["capabilities"]["resources"].is_null());
+        assert!(result["capabilities"]["prompts"].is_null());
+        assert!(result["instructions"].is_string());
         assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_handle_initialize_version_negotiation() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "initialize".to_string(),
+            params: Some(json!({ "protocolVersion": "2024-11-05" })),
+            id: Some(Value::Number(1.into())),
+        };
+        assert_eq!(
+            handle_initialize(&req).unwrap()["protocolVersion"],
+            "2024-11-05"
+        );
+    }
+
+    #[test]
+    fn test_tool_result_wrapping() {
+        let ok = tool_success(json!({ "ok": 1 }));
+        assert_eq!(ok["isError"], false);
+        assert_eq!(ok["content"][0]["type"], "text");
+        assert_eq!(ok["structuredContent"]["ok"], 1);
+
+        // A ready-made CallToolResult (content array) is passed through.
+        let img = tool_success(json!({ "content": [{ "type": "image", "data": "x", "mimeType": "image/png" }] }));
+        assert_eq!(img["content"][0]["type"], "image");
+        assert_eq!(img["isError"], false);
+
+        let err = tool_error("nope");
+        assert_eq!(err["isError"], true);
+        assert_eq!(err["content"][0]["text"], "nope");
     }
 }

@@ -1113,15 +1113,17 @@ async fn test_readonly_mode_blocks_write() {
         id: Some(json!(1)),
     };
 
-    let res = process_request(&req, &config).await;
-    assert!(res.is_err(), "Write should fail in read-only mode");
-    match res {
-        Err(e) => assert!(
-            e.to_string().contains("not allowed in read-only mode"),
-            "Unexpected error: {e}"
-        ),
-        _ => unreachable!(),
-    }
+    // Policy rejections are now CallToolResults with isError=true (so the model
+    // can see them), not JSON-RPC protocol errors.
+    let res = process_request(&req, &config).await.expect("dispatch ok");
+    assert_eq!(res["isError"], json!(true), "Write should be blocked: {res}");
+    assert!(
+        res["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not allowed in read-only mode"),
+        "Unexpected message: {res}"
+    );
 }
 
 #[tokio::test]
@@ -1181,9 +1183,12 @@ async fn csv_dispatch_ok(
     name: &str,
     args: serde_json::Value,
 ) -> serde_json::Value {
-    csv_dispatch(config, name, args)
+    let res = csv_dispatch(config, name, args)
         .await
-        .expect(&format!("{name} via dispatch failed"))
+        .expect(&format!("{name} via dispatch failed"));
+    // tools/call now returns a CallToolResult; assertions target the payload.
+    assert_ne!(res["isError"], json!(true), "{name} returned isError: {res}");
+    res.get("structuredContent").cloned().unwrap_or(res)
 }
 
 async fn csv_dispatch_err(
@@ -1191,10 +1196,15 @@ async fn csv_dispatch_err(
     name: &str,
     args: serde_json::Value,
 ) -> String {
-    csv_dispatch(config, name, args)
-        .await
-        .unwrap_err()
-        .to_string()
+    // Tool execution failures surface as isError CallToolResults, not Err.
+    match csv_dispatch(config, name, args).await {
+        Ok(v) if v["isError"] == json!(true) => v["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        Ok(v) => panic!("{name} expected error, got: {v}"),
+        Err(e) => e.to_string(),
+    }
 }
 
 #[tokio::test]
@@ -1392,9 +1402,12 @@ async fn dispatch_ok(
     name: &str,
     args: serde_json::Value,
 ) -> serde_json::Value {
-    dispatch_call(config, name, args)
+    let res = dispatch_call(config, name, args)
         .await
-        .unwrap_or_else(|e| panic!("{name} via dispatch failed: {e}"))
+        .unwrap_or_else(|e| panic!("{name} via dispatch failed: {e}"));
+    // tools/call returns a CallToolResult; assertions target the payload.
+    assert_ne!(res["isError"], json!(true), "{name} returned isError: {res}");
+    res.get("structuredContent").cloned().unwrap_or(res)
 }
 
 async fn dispatch_err(
@@ -1402,10 +1415,15 @@ async fn dispatch_err(
     name: &str,
     args: serde_json::Value,
 ) -> String {
-    dispatch_call(config, name, args)
-        .await
-        .unwrap_err()
-        .to_string()
+    // Tool execution failures surface as isError CallToolResults, not Err.
+    match dispatch_call(config, name, args).await {
+        Ok(v) if v["isError"] == json!(true) => v["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        Ok(v) => panic!("{name} expected error, got: {v}"),
+        Err(e) => e.to_string(),
+    }
 }
 
 #[tokio::test]

@@ -7,6 +7,13 @@ A high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 
 It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio**, **TCP** (line-delimited JSON-RPC), and **HTTP** (`POST /rpc`) transports, all behind a strict path sandbox.
 
+> **MCP suite.** One of four high-performance MCP servers written in Rust —
+> [mcp-postgres](https://github.com/corporatepiyush/mcp-pg-rust) ·
+> [mcp-filesystem](https://github.com/corporatepiyush/mcp-filesystem-rust) ·
+> [mcp-memory](https://github.com/corporatepiyush/mcp-memory) ·
+> [mcp-web-search](https://github.com/corporatepiyush/mcp-web-search).
+> All implement MCP protocol revision **`2025-11-25`**.
+
 ## Features
 
 - **Parallel async I/O** built on Tokio with the `mimalloc` allocator and zero-copy memory-mapped reads.
@@ -94,6 +101,35 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 | `--auth-token <TOKEN>` | — | Bearer token required on TCP (first line) and HTTP (`Authorization` header) |
 | `--max-connections <N>` | `1024` | Maximum concurrent TCP connections |
 
+## MCP Compliance
+
+Implements the [Model Context Protocol](https://modelcontextprotocol.io) revision **`2025-11-25`** over JSON-RPC 2.0, via stdio, TCP, or HTTP.
+
+| Area | Support |
+|---|---|
+| Transports | stdio, TCP, HTTP (`POST /rpc`) |
+| Protocol version | `2025-11-25`, negotiates down to `2025-06-18` / `2025-03-26` / `2024-11-05` |
+| `initialize` | ✅ version negotiation + `instructions` |
+| `tools/list`, `tools/call` | ✅ (41 tools) |
+| `CallToolResult` | ✅ `content[]` + `structuredContent` + `isError`; `read_media_file` returns typed `image`/`audio` content |
+| Capabilities advertised | `tools` only — nothing is advertised that isn't implemented |
+| `resources` · `prompts` · `logging` · Streamable HTTP | ❌ roadmap — see [MIGRATION.md](./MIGRATION.md) |
+
+Every `tools/call` returns a spec-compliant `CallToolResult`. The payload is
+available as a machine-readable `structuredContent` object and as serialized
+`text`; tool failures come back with `isError: true` (not as JSON-RPC protocol
+errors) so the model can self-correct.
+
+```json
+{
+  "content": [{ "type": "text", "text": "{\"content\":\"Hello, World!\",\"totalLines\":1}" }],
+  "structuredContent": { "content": "Hello, World!", "totalLines": 1 },
+  "isError": false
+}
+```
+
+Upgrading from 1.x? The result shape changed — see **[MIGRATION.md](./MIGRATION.md)**.
+
 ## Security
 
 - **Path sandboxing**: every path is canonicalized and checked against the allow-list. Symlink components are rejected unless `--follow-symlinks` is set; write destinations whose final component is a symlink are also rejected.
@@ -105,9 +141,20 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 
 ```sh
 cargo build      # Build all targets
-cargo test       # Run the full test suite (34 unit + 50 integration)
+cargo test       # Run the full test suite (unit + integration)
 cargo clippy     # Zero-warnings lint check
 ```
+
+## Versioning & Compatibility
+
+Follows [Semantic Versioning](https://semver.org). The current line is **2.x**,
+targeting MCP revision `2025-11-25`. The `2.0.0` release changed the `tools/call`
+result shape to be spec-compliant — see **[MIGRATION.md](./MIGRATION.md)**.
+
+| mcp-filesystem | MCP revision (default) | Negotiates |
+|---|---|---|
+| 2.x | `2025-11-25` | `2025-06-18`, `2025-03-26`, `2024-11-05` |
+| ≤ 1.x | `2024-11-05` | — |
 
 ## License
 
