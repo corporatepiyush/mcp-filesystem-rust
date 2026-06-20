@@ -5,6 +5,7 @@ pub mod http;
 pub mod protocol;
 pub mod server;
 pub mod structures;
+pub mod tls;
 pub mod tools;
 pub mod validation;
 
@@ -71,4 +72,15 @@ pub struct Args {
     /// Maximum number of concurrent TCP connections.
     #[arg(long, default_value = "1024")]
     pub max_connections: usize,
+
+    /// Path to a PEM certificate chain to serve the HTTP transport over TLS
+    /// (HTTPS). Requires --tls-key. Falls back to the MCP_TLS_CERT env var.
+    /// When unset, the HTTP transport stays plaintext.
+    #[arg(long)]
+    pub tls_cert: Option<String>,
+
+    /// Path to the PEM private key matching --tls-cert. Falls back to the
+    /// MCP_TLS_KEY env var.
+    #[arg(long)]
+    pub tls_key: Option<String>,
 }

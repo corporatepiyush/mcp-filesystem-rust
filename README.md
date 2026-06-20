@@ -100,6 +100,21 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 | `--max-request-bytes <BYTES>` | `16777216` | Max size of a single TCP/stdio request line |
 | `--auth-token <TOKEN>` | — | Bearer token required on TCP (first line) and HTTP (`Authorization` header) |
 | `--max-connections <N>` | `1024` | Maximum concurrent TCP connections |
+| `--tls-cert <PATH>` | — | PEM certificate chain to serve the HTTP transport over TLS (HTTPS). Requires `--tls-key` |
+| `--tls-key <PATH>` | — | PEM private key matching `--tls-cert` |
+
+### TLS (HTTPS)
+
+The HTTP transport can be served over TLS (rustls, `ring` provider). Provide a
+PEM certificate chain and private key — via `--tls-cert`/`--tls-key` or the
+`MCP_TLS_CERT`/`MCP_TLS_KEY` environment variables — and the HTTP server speaks
+HTTPS instead of plaintext. The two must be supplied together; otherwise the
+server refuses to start. When neither is set, the HTTP transport stays plaintext
+(the default). The TCP transport is unaffected.
+
+```bash
+mcp-filesystem --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem
+```
 
 ## MCP Compliance
 

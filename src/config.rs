@@ -92,6 +92,14 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
     /// Max concurrent TCP connections.
     pub max_connections: usize,
+    /// PEM certificate chain for serving the HTTP transport over TLS (HTTPS).
+    /// `None` (the default) keeps the HTTP transport plaintext. Engaged only
+    /// when both `tls_cert` and `tls_key` are set.
+    #[serde(default)]
+    pub tls_cert: Option<std::path::PathBuf>,
+    /// PEM private key matching `tls_cert`.
+    #[serde(default)]
+    pub tls_key: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -101,6 +109,26 @@ impl Config {
         } else {
             vec![std::env::current_dir()?.to_string_lossy().to_string()]
         };
+
+        // TLS cert/key for the HTTP transport, from CLI flags or env vars. Both
+        // must be supplied together; one without the other is a hard error.
+        let tls_cert = args
+            .tls_cert
+            .clone()
+            .or_else(|| std::env::var("MCP_TLS_CERT").ok())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        let tls_key = args
+            .tls_key
+            .clone()
+            .or_else(|| std::env::var("MCP_TLS_KEY").ok())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        if tls_cert.is_some() != tls_key.is_some() {
+            anyhow::bail!(
+                "--tls-cert and --tls-key must be provided together (or both omitted for plaintext HTTP)"
+            );
+        }
 
         let allowed_trie = Arc::new(build_allowed_trie(&allowed_dirs));
         Ok(Config {
@@ -115,6 +143,8 @@ impl Config {
                 max_request_bytes: args.max_request_bytes,
                 auth_token: args.auth_token.clone(),
                 max_connections: args.max_connections,
+                tls_cert,
+                tls_key,
             },
             max_file_size: args.max_file_size * 1024 * 1024,
             max_decompressed_size: args.max_decompressed_size * 1024 * 1024,
@@ -176,6 +206,8 @@ impl Default for Config {
                 max_request_bytes: 16 * 1024 * 1024,
                 auth_token: None,
                 max_connections: 1024,
+                tls_cert: None,
+                tls_key: None,
             },
             max_file_size: 100 * 1024 * 1024,
             max_decompressed_size: 1024 * 1024 * 1024,
