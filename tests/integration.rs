@@ -26,14 +26,15 @@ fn test_config() -> mcp_filesystem::config::Config {
         vec![dir],
         mcp_filesystem::config::ServerConfig {
             host: "127.0.0.1".into(),
-            port: 0,
             http_port: 0,
             request_timeout: std::time::Duration::from_secs(5),
             access_mode: mcp_filesystem::config::AccessMode::Unrestricted,
             follow_symlinks: false,
             max_request_bytes: 16 * 1024 * 1024,
             auth_token: None,
-            max_connections: 1024,
+            enabled_categories: mcp_filesystem::tools::ToolCategory::ALL.to_vec(),
+            tls_cert: None,
+            tls_key: None,
         },
         100 * 1024 * 1024,
     )

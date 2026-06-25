@@ -5,7 +5,15 @@
 
 A high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for filesystem access, written in Rust on the Tokio async runtime.
 
-It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio**, **TCP** (line-delimited JSON-RPC), and **HTTP** (`POST /rpc`) transports, all behind a strict path sandbox.
+It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio** and **HTTP** (`POST /rpc`) transports, all behind a strict path sandbox.
+
+> **Tools are opt-in (2.2.0+).** No tools are exposed by default. Enable them one
+> *category* at a time with `--enable-<category>` flags (or `--enable-all`). A
+> server started with no enable flags advertises an **empty** tool list. See
+> [Tool Exposure](#tool-exposure-opt-in-by-category).
+
+> **TCP removed (2.2.0+).** The line-delimited TCP transport has been dropped;
+> use **stdio** (for MCP clients) or **HTTP**.
 
 > **MCP suite.** One of four high-performance MCP servers written in Rust —
 > [mcp-postgres](https://github.com/corporatepiyush/mcp-pg-rust) ·
@@ -18,7 +26,7 @@ It exposes a rich set of filesystem tools — reads, writes, edits, search, hash
 
 - **Parallel async I/O** built on Tokio with the `mimalloc` allocator and zero-copy memory-mapped reads.
 - **Secure path sandboxing** — every path is validated against an allow-list (via a `PathTrie`) with symlink-escape protection.
-- **Multiple transports** — stdio (for MCP clients), TCP line-delimited JSON-RPC, and an HTTP JSON-RPC endpoint (`POST /rpc`, `GET /health`).
+- **Two transports** — stdio (for MCP clients) and an HTTP JSON-RPC endpoint (`POST /rpc`, `GET /health`).
 - **Access modes** — `unrestricted` or `readonly` (write tools are rejected in readonly mode).
 - **41 tools**, including:
   - **Files**: read/write/edit, copy/move/delete, directory listing & trees, metadata, permissions, disk usage, symlinks, ranged reads.
@@ -57,16 +65,19 @@ cargo build --release
 
 ## Usage
 
+Tools are opt-in — pass one or more `--enable-<category>` flags (or
+`--enable-all`). Without them the server exposes no tools.
+
 ### stdio mode (for MCP clients)
 
 ```sh
-mcp-filesystem --stdio --directories /path/to/allowed/dir
+mcp-filesystem --stdio --directories /path/to/allowed/dir --enable-read --enable-write
 ```
 
-### Network mode (TCP + HTTP)
+### HTTP mode
 
 ```sh
-mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
+mcp-filesystem --directories /path/to/allowed/dir --http-port 3001 --enable-all
 ```
 
 ### Example MCP client configuration
@@ -76,7 +87,7 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
   "mcpServers": {
     "filesystem": {
       "command": "mcp-filesystem",
-      "args": ["--stdio", "--directories", "/path/to/allowed/dir"]
+      "args": ["--stdio", "--directories", "/path/to/allowed/dir", "--enable-all"]
     }
   }
 }
@@ -87,8 +98,7 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 | Flag | Default | Description |
 |---|---|---|
 | `-d, --directories <DIR>` | — | Directories to allow access to (repeatable) |
-| `-H, --host <HOST>` | `127.0.0.1` | Server host |
-| `-p, --port <PORT>` | `3000` | TCP server port |
+| `-H, --host <HOST>` | `127.0.0.1` | Server host (HTTP transport) |
 | `--http-port <PORT>` | `3001` | HTTP server port |
 | `-l, --log-level <LEVEL>` | `info` | Log level |
 | `--max-file-size <MB>` | `100` | Maximum file size (MB) for reads |
@@ -97,11 +107,18 @@ mcp-filesystem --directories /path/to/allowed/dir --port 3000 --http-port 3001
 | `--follow-symlinks` | `false` | Follow symbolic links |
 | `--request-timeout <SECS>` | `30` | Request timeout in seconds (enforced per request) |
 | `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
-| `--max-request-bytes <BYTES>` | `16777216` | Max size of a single TCP/stdio request line |
-| `--auth-token <TOKEN>` | — | Bearer token required on TCP (first line) and HTTP (`Authorization` header) |
-| `--max-connections <N>` | `1024` | Maximum concurrent TCP connections |
+| `--max-request-bytes <BYTES>` | `16777216` | Max size of a single stdio request line |
+| `--auth-token <TOKEN>` | — | Bearer token required on HTTP (`Authorization` header) |
 | `--tls-cert <PATH>` | — | PEM certificate chain to serve the HTTP transport over TLS (HTTPS). Requires `--tls-key` |
 | `--tls-key <PATH>` | — | PEM private key matching `--tls-cert` |
+| **Tool exposure** | | *(none enabled by default)* |
+| `--enable-all` | `false` | Expose every category (overrides the flags below) |
+| `--enable-read` | `false` | **Read**: read files, list/search/stat, hashes, disk usage |
+| `--enable-write` | `false` | **Write**: write/edit, create dir, move/copy, perms, symlink |
+| `--enable-delete` | `false` | **Delete**: delete file/directory |
+| `--enable-compress` | `false` | **Compress**: gzip, zstd, tar (de)compression |
+| `--enable-crypto` | `false` | **Crypto**: encrypt/decrypt files, key generation |
+| `--enable-csv` | `false` | **CSV**: CSV read/write helpers |
 
 ### TLS (HTTPS)
 
@@ -110,7 +127,27 @@ PEM certificate chain and private key — via `--tls-cert`/`--tls-key` or the
 `MCP_TLS_CERT`/`MCP_TLS_KEY` environment variables — and the HTTP server speaks
 HTTPS instead of plaintext. The two must be supplied together; otherwise the
 server refuses to start. When neither is set, the HTTP transport stays plaintext
-(the default). The TCP transport is unaffected.
+(the default).
+
+### Tool Exposure (opt-in by category)
+
+Every tool belongs to one of **6 categories**. **Nothing is exposed until you
+enable its category** — disabled tools are hidden from `tools/list` and rejected
+from `tools/call` as if they did not exist. This lets you grant an agent exactly
+the surface area it needs (e.g. read-only `--enable-read`).
+
+| Flag | Category | Tools |
+|------|----------|-------|
+| `--enable-read` | **Read** | `read_text_file`, `read_media_file`, `read_file_range`, `list_directory`, `list_directory_with_sizes`, `directory_tree`, `get_file_info`, `search_files`, `grep_files`, `hash_file`, `get_disk_usage`, `list_allowed_directories` |
+| `--enable-write` | **Write** | `write_file`, `edit_file`, `create_directory`, `move_file`, `copy_file`, `set_permissions`, `create_symlink` |
+| `--enable-delete` | **Delete** | `delete_file`, `delete_directory` |
+| `--enable-compress` | **Compress** | `compress_gzip`/`decompress_gzip`, `compress_zstd`/`decompress_zstd`, `compress_tar`/`decompress_tar` |
+| `--enable-crypto` | **Crypto** | `encrypt_file`, `decrypt_file`, `generate_key` |
+| `--enable-csv` | **CSV** | `csv_create`, `csv_read`, `csv_add_row`, `csv_update_cell`, `csv_remove_row`, `csv_add_column`, `csv_remove_column`, `csv_rename_column`, `csv_read_column_values_range`, `csv_read_row_range`, `csv_select_column_range` |
+| `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
+
+Category gating composes with `--access-mode readonly` (which additionally
+blocks all write tools).
 
 ```bash
 mcp-filesystem --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem
@@ -118,11 +155,11 @@ mcp-filesystem --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem
 
 ## MCP Compliance
 
-Implements the [Model Context Protocol](https://modelcontextprotocol.io) revision **`2025-11-25`** over JSON-RPC 2.0, via stdio, TCP, or HTTP.
+Implements the [Model Context Protocol](https://modelcontextprotocol.io) revision **`2025-11-25`** over JSON-RPC 2.0, via stdio or HTTP.
 
 | Area | Support |
 |---|---|
-| Transports | stdio, TCP, HTTP (`POST /rpc`) |
+| Transports | stdio, HTTP (`POST /rpc`) |
 | Protocol version | `2025-11-25`, negotiates down to `2025-06-18` / `2025-03-26` / `2024-11-05` |
 | `initialize` | ✅ version negotiation + `instructions` |
 | `tools/list`, `tools/call` | ✅ (41 tools) |

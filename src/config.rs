@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::structures::PathTrie;
 use crate::validation::Sandbox;
+pub use crate::tools::ToolCategory;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AccessMode {
@@ -55,6 +56,15 @@ pub struct Config {
     /// Lazily initialised on first use; never serialized.
     #[serde(skip)]
     sandbox: OnceLock<Arc<Sandbox>>,
+    /// Pre-serialized `{"tools":[...]}` payload for `tools/list`, filtered to
+    /// the enabled categories (see `server.enabled_categories`). Skipped during
+    /// (de)serialization and rebuilt from the enabled set.
+    #[serde(skip, default = "default_tools_list_bytes")]
+    pub tools_list_bytes: Arc<Vec<u8>>,
+}
+
+fn default_tools_list_bytes() -> Arc<Vec<u8>> {
+    Arc::new(crate::server::build_tools_list_response(&[]))
 }
 
 /// Build a canonicalized `PathTrie` from a list of allowed directory strings.
@@ -81,17 +91,18 @@ fn build_allowed_trie(allowed_dirs: &[String]) -> PathTrie {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
-    pub port: u16,
     pub http_port: u16,
     pub request_timeout: Duration,
     pub access_mode: AccessMode,
     pub follow_symlinks: bool,
-    /// Max bytes for a single request line on TCP/stdio transports.
+    /// Max bytes for a single request line on the stdio transport.
     pub max_request_bytes: usize,
-    /// Optional bearer token for TCP/HTTP authentication.
+    /// Optional bearer token for HTTP authentication.
     pub auth_token: Option<String>,
-    /// Max concurrent TCP connections.
-    pub max_connections: usize,
+    /// Tool categories exposed by this server. Empty (the default) means no
+    /// tools are advertised or callable until enabled with `--enable-*`.
+    #[serde(default)]
+    pub enabled_categories: Vec<ToolCategory>,
     /// PEM certificate chain for serving the HTTP transport over TLS (HTTPS).
     /// `None` (the default) keeps the HTTP transport plaintext. Engaged only
     /// when both `tls_cert` and `tls_key` are set.
@@ -131,18 +142,20 @@ impl Config {
         }
 
         let allowed_trie = Arc::new(build_allowed_trie(&allowed_dirs));
+        let enabled_categories = args.enabled_categories();
+        let tools_list_bytes =
+            Arc::new(crate::server::build_tools_list_response(&enabled_categories));
         Ok(Config {
             allowed_directories: allowed_dirs,
             server: ServerConfig {
                 host: args.host.clone(),
-                port: args.port,
                 http_port: args.http_port,
                 request_timeout: Duration::from_secs(args.request_timeout),
                 access_mode: args.access_mode,
                 follow_symlinks: args.follow_symlinks,
                 max_request_bytes: args.max_request_bytes,
                 auth_token: args.auth_token.clone(),
-                max_connections: args.max_connections,
+                enabled_categories,
                 tls_cert,
                 tls_key,
             },
@@ -150,12 +163,16 @@ impl Config {
             max_decompressed_size: args.max_decompressed_size * 1024 * 1024,
             allowed_trie,
             sandbox: OnceLock::new(),
+            tools_list_bytes,
         })
     }
 
-    /// Construct a `Config`, building the precomputed allowed-directory trie.
+    /// Construct a `Config`, building the precomputed allowed-directory trie and
+    /// the category-filtered `tools/list` payload.
     pub fn new(allowed_directories: Vec<String>, server: ServerConfig, max_file_size: u64) -> Self {
         let allowed_trie = Arc::new(build_allowed_trie(&allowed_directories));
+        let tools_list_bytes =
+            Arc::new(crate::server::build_tools_list_response(&server.enabled_categories));
         Self {
             allowed_directories,
             server,
@@ -163,6 +180,7 @@ impl Config {
             max_decompressed_size: 1024 * 1024 * 1024,
             allowed_trie,
             sandbox: OnceLock::new(),
+            tools_list_bytes,
         }
     }
 
@@ -198,14 +216,13 @@ impl Default for Config {
             allowed_directories,
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
-                port: 3000,
                 http_port: 3001,
                 request_timeout: Duration::from_secs(30),
                 access_mode: AccessMode::Unrestricted,
                 follow_symlinks: false,
                 max_request_bytes: 16 * 1024 * 1024,
                 auth_token: None,
-                max_connections: 1024,
+                enabled_categories: Vec::new(),
                 tls_cert: None,
                 tls_key: None,
             },
@@ -213,6 +230,7 @@ impl Default for Config {
             max_decompressed_size: 1024 * 1024 * 1024,
             allowed_trie,
             sandbox: OnceLock::new(),
+            tools_list_bytes: default_tools_list_bytes(),
         }
     }
 }
@@ -225,7 +243,7 @@ mod tests {
     fn test_config_defaults() {
         let cfg = Config::default();
         assert_eq!(cfg.server.host, "127.0.0.1");
-        assert_eq!(cfg.server.port, 3000);
+        assert_eq!(cfg.server.http_port, 3001);
         assert_eq!(cfg.max_file_size, 100 * 1024 * 1024);
         assert!(!cfg.server.follow_symlinks);
     }

@@ -29,14 +29,15 @@ fn config_for(dir: &PathBuf, mode: AccessMode) -> Config {
         vec![dir.to_string_lossy().to_string()],
         ServerConfig {
             host: "127.0.0.1".into(),
-            port: 0,
             http_port: 0,
             request_timeout: std::time::Duration::from_secs(5),
             access_mode: mode,
             follow_symlinks: false,
             max_request_bytes: 16 * 1024 * 1024,
             auth_token: None,
-            max_connections: 1024,
+            enabled_categories: mcp_filesystem::tools::ToolCategory::ALL.to_vec(),
+            tls_cert: None,
+            tls_key: None,
         },
         100 * 1024 * 1024,
     )

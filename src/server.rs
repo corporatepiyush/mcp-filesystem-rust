@@ -2,8 +2,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::actions;
 use crate::config::Config;
@@ -11,14 +10,30 @@ use crate::errors::{MCSError, Result as MCSResult};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use tokio::sync::Semaphore;
 
-static TOOLS_LIST_RESPONSE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+/// Every tool definition from `tools.json`, parsed once. The `tools/list`
+/// payload is derived from this by filtering to a server's enabled categories.
+static ALL_TOOL_DEFS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     let tools_json = include_str!("../tools.json");
-    let tools: Vec<Value> = serde_json::from_str(tools_json).expect("Failed to parse tools.json");
+    serde_json::from_str(tools_json).expect("Failed to parse tools.json")
+});
+
+/// Build the pre-serialized `{"tools":[...]}` payload for `tools/list`, filtered
+/// to the enabled categories. Tools whose category is not enabled are omitted
+/// entirely; with an empty `enabled` set the payload is `{"tools":[]}`. The
+/// result is cached per-`Config` (see `Config::tools_list_bytes`).
+pub fn build_tools_list_response(enabled: &[crate::tools::ToolCategory]) -> Vec<u8> {
+    let tools: Vec<&Value> = ALL_TOOL_DEFS
+        .iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| crate::tools::is_tool_available(name, enabled))
+        })
+        .collect();
     let resp = json!({ "tools": tools });
     serde_json::to_vec(&resp).expect("Failed to serialize tools/list response")
-});
+}
 
 const BUFFER_CAPACITY: usize = 65536;
 const NEWLINE: &[u8] = b"\n";
@@ -152,81 +167,6 @@ impl MCPServer {
         Ok(())
     }
 
-    pub async fn run(&self) -> MCSResult<()> {
-        let addr = format!("{}:{}", self.config.server.host, self.config.server.port);
-        let listener = TcpListener::bind(&addr).await?;
-        tracing::info!("MCP filesystem server listening on {}", addr);
-
-        // Bound concurrent connections to prevent a connection-flood DoS.
-        let limiter = Arc::new(Semaphore::new(self.config.server.max_connections));
-
-        loop {
-            // Acquire a permit before accepting so we apply backpressure.
-            let permit = Arc::clone(&limiter)
-                .acquire_owned()
-                .await
-                .expect("connection semaphore closed");
-            let (socket, peer_addr) = listener.accept().await?;
-            if let Err(e) = socket.set_nodelay(true) {
-                warn!("Failed to set TCP_NODELAY: {}", e);
-            }
-
-            let config = Arc::clone(&self.config);
-            tokio::spawn(async move {
-                if let Err(e) = handle_client(socket, config).await {
-                    error!("Client {} error: {}", peer_addr, e);
-                }
-                drop(permit);
-            });
-        }
-    }
-}
-
-async fn handle_client(socket: TcpStream, config: Arc<Config>) -> MCSResult<()> {
-    let (reader, mut writer) = socket.into_split();
-    let mut reader = BufReader::with_capacity(BUFFER_CAPACITY, reader);
-    let mut line = String::with_capacity(1024);
-    let mut response_buf = Vec::with_capacity(65536);
-    let max = config.server.max_request_bytes;
-
-    // When an auth token is configured, require the first line to present it
-    // before any request is processed.
-    if let Some(expected) = config.server.auth_token.as_deref() {
-        match read_line_capped(&mut reader, &mut line, max).await {
-            Ok(LineRead::Line) if token_matches(&line, expected) => {}
-            Ok(LineRead::Eof) => return Ok(()),
-            _ => {
-                let err = MCSError::InvalidParams(
-                    "Authentication required: send the bearer token as the first line".into(),
-                );
-                let response = JsonRpcResponse::error(None, err.error_code(), err.to_string());
-                response_buf.clear();
-                serde_json::to_writer(&mut response_buf, &response)?;
-                response_buf.extend_from_slice(NEWLINE);
-                writer.write_all(&response_buf).await?;
-                writer.flush().await?;
-                return Ok(());
-            }
-        }
-    }
-
-    loop {
-        match read_line_capped(&mut reader, &mut line, max).await {
-            Ok(LineRead::Eof) => break,
-            Ok(LineRead::Line) => {
-                process_one_line(&line, &config, &mut response_buf, &mut writer).await?;
-            }
-            Ok(LineRead::TooLong) => {
-                write_oversize_error(&mut response_buf, &mut writer, max).await?;
-                break;
-            }
-            Err(e) => {
-                error!("IO error: {}", e);
-                break;
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn write_oversize_error<W: AsyncWriteExt + Unpin>(
@@ -289,7 +229,7 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
 pub async fn process_request(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
     match req.method.as_str() {
         "initialize" => handle_initialize(req),
-        "tools/list" => handle_tools_list(),
+        "tools/list" => handle_tools_list(config),
         "tools/call" => handle_tools_call(req, config).await,
         "ping" => handle_ping(),
         method if method.starts_with("notifications/") => handle_notification(method),
@@ -403,8 +343,10 @@ fn tool_error(message: impl Into<String>) -> Value {
     })
 }
 
-fn handle_tools_list() -> MCSResult<Value> {
-    Ok(serde_json::from_slice(&TOOLS_LIST_RESPONSE)?)
+fn handle_tools_list(config: &Config) -> MCSResult<Value> {
+    // Deserialize from the per-config cached bytes (already filtered to the
+    // enabled categories).
+    Ok(serde_json::from_slice(&config.tools_list_bytes)?)
 }
 
 async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
@@ -416,6 +358,14 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
 
     let tool_args = req.params.as_ref().and_then(|p| p.get("arguments"));
 
+    // Category gate: a tool is only reachable if it exists AND its category was
+    // enabled at startup. Tools in disabled categories are invisible (absent
+    // from tools/list), so a call to one is an unknown method, not a policy
+    // isError.
+    if !crate::tools::is_tool_available(tool_name, &config.server.enabled_categories) {
+        return Err(method_not_found(tool_name));
+    }
+
     if config.server.access_mode == crate::config::AccessMode::ReadOnly
         && crate::tools::is_write_tool(tool_name)
     {
@@ -423,10 +373,6 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
         return Ok(tool_error(format!(
             "Operation '{tool_name}' is not allowed in read-only mode"
         )));
-    }
-
-    if !crate::tools::tool_exists(tool_name) {
-        return Err(method_not_found(tool_name));
     }
 
     let result = match tool_name {

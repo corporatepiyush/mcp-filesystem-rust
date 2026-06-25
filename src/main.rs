@@ -50,6 +50,27 @@ async fn inner_main() -> Result<()> {
     let mcp_server = server::MCPServer::from_arc(Arc::clone(&config));
     info!("Server initialized successfully");
 
+    // Tool exposure: nothing is advertised unless a category was enabled.
+    let enabled = &config.server.enabled_categories;
+    if enabled.is_empty() {
+        warn!(
+            "No tool categories enabled — the server will expose ZERO tools. \
+             Enable categories with --enable-<category> (e.g. --enable-read --enable-write) \
+             or expose everything with --enable-all."
+        );
+    } else {
+        let slugs: Vec<&str> = enabled.iter().map(|c| c.slug()).collect();
+        let exposed = mcp_filesystem::tools::ALL_TOOLS
+            .iter()
+            .filter(|t| enabled.contains(&t.category))
+            .count();
+        info!(
+            "Tool categories enabled: {} ({} tools exposed)",
+            slugs.join(", "),
+            exposed
+        );
+    }
+
     if !is_loopback_host(&config.server.host) && config.server.auth_token.is_none() && !args.stdio {
         warn!(
             "Binding to non-loopback host '{}' WITHOUT authentication — all allowed directories are exposed to the network. Set --auth-token to require a bearer token.",
@@ -61,27 +82,10 @@ async fn inner_main() -> Result<()> {
         info!("Running in stdio mode");
         mcp_server.run_stdio().await?;
     } else {
-        info!("Starting TCP server on port {}", args.port);
         info!("Starting HTTP server on port {}", args.http_port);
-
-        let tcp_handle = tokio::spawn(async move {
-            if let Err(e) = mcp_server.run().await {
-                eprintln!("TCP server error: {}", e);
-            }
-        });
-
-        let http_config = Arc::clone(&config);
-        let http_port = args.http_port;
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = http::create_http_server(http_config, http_port).await {
-                eprintln!("HTTP server error: {}", e);
-            }
-        });
-
-        tokio::select! {
-            _ = tcp_handle => info!("TCP server exited"),
-            _ = http_handle => info!("HTTP server exited"),
-        }
+        http::create_http_server(Arc::clone(&config), args.http_port)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     }
 
     info!("Server shutdown complete");
