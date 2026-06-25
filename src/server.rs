@@ -48,19 +48,33 @@ enum LineRead {
     TooLong,
 }
 
-/// Read a single newline-terminated line into `out`, but never buffer more than
-/// `max` bytes. On overflow returns `TooLong` without allocating the whole line,
-/// so a hostile client cannot exhaust memory with one giant unterminated line.
+/// Read a single newline-terminated line, but never buffer more than `max`
+/// bytes. On overflow returns `TooLong` without allocating the whole line, so a
+/// hostile client cannot exhaust memory with one giant unterminated line. Both
+/// `buf` (the byte accumulator) and `out` (the decoded line) are caller-owned
+/// and reused across calls, so a long-lived connection performs no per-request
+/// line allocation — only the decode copy into `out`'s retained capacity.
 async fn read_line_capped<R>(
     reader: &mut R,
+    buf: &mut Vec<u8>,
     out: &mut String,
     max: usize,
 ) -> std::io::Result<LineRead>
 where
     R: AsyncBufReadExt + Unpin,
 {
+    buf.clear();
     out.clear();
-    let mut buf: Vec<u8> = Vec::new();
+    // Decode the accumulated bytes into `out`, reusing its capacity. The common
+    // path (valid UTF-8) is a single copy; only malformed input takes the lossy
+    // allocation.
+    fn finish(buf: &[u8], out: &mut String) -> LineRead {
+        match std::str::from_utf8(buf) {
+            Ok(s) => out.push_str(s),
+            Err(_) => out.push_str(&String::from_utf8_lossy(buf)),
+        }
+        LineRead::Line
+    }
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -68,8 +82,7 @@ where
             if buf.is_empty() {
                 return Ok(LineRead::Eof);
             }
-            *out = String::from_utf8_lossy(&buf).into_owned();
-            return Ok(LineRead::Line);
+            return Ok(finish(buf, out));
         }
         match available.iter().position(|&b| b == b'\n') {
             Some(i) => {
@@ -79,8 +92,7 @@ where
                 }
                 buf.extend_from_slice(&available[..=i]);
                 reader.consume(i + 1);
-                *out = String::from_utf8_lossy(&buf).into_owned();
-                return Ok(LineRead::Line);
+                return Ok(finish(buf, out));
             }
             None => {
                 let take = available.len();
@@ -145,11 +157,12 @@ impl MCPServer {
         let mut reader = BufReader::with_capacity(BUFFER_CAPACITY, stdin);
         let mut stdout = tokio::io::stdout();
         let mut line = String::with_capacity(1024);
+        let mut read_buf = Vec::with_capacity(1024);
         let mut response_buf = Vec::with_capacity(65536);
         let max = self.config.server.max_request_bytes;
 
         loop {
-            match read_line_capped(&mut reader, &mut line, max).await {
+            match read_line_capped(&mut reader, &mut read_buf, &mut line, max).await {
                 Ok(LineRead::Eof) => break,
                 Ok(LineRead::Line) => {
                     process_one_line(&line, &self.config, &mut response_buf, &mut stdout).await?;
@@ -223,7 +236,20 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
 
     writer.write_all(response_buf).await?;
     writer.flush().await?;
+    maybe_shrink_buf(response_buf);
     Ok(())
+}
+
+/// Release an oversized response buffer back to a small capacity. A single large
+/// response (e.g. a big `read_text_file`, up to `max_file_size`) would otherwise
+/// pin that capacity for the whole stdio session; this caps idle memory between
+/// requests.
+#[inline]
+fn maybe_shrink_buf(buf: &mut Vec<u8>) {
+    const SHRINK_THRESHOLD: usize = 1 << 20; // 1 MiB
+    if buf.capacity() > SHRINK_THRESHOLD {
+        *buf = Vec::with_capacity(65536);
+    }
 }
 
 pub async fn process_request(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
@@ -473,8 +499,9 @@ mod tests {
         // A line longer than the cap, without a newline, must be rejected.
         let data = vec![b'a'; 1024];
         let mut reader = tokio::io::BufReader::new(&data[..]);
+        let mut buf = Vec::new();
         let mut line = String::new();
-        let res = read_line_capped(&mut reader, &mut line, 100).await.unwrap();
+        let res = read_line_capped(&mut reader, &mut buf, &mut line, 100).await.unwrap();
         assert!(matches!(res, LineRead::TooLong));
     }
 
@@ -482,8 +509,9 @@ mod tests {
     async fn test_read_line_capped_reads_line() {
         let data = b"hello\nworld\n";
         let mut reader = tokio::io::BufReader::new(&data[..]);
+        let mut buf = Vec::new();
         let mut line = String::new();
-        let res = read_line_capped(&mut reader, &mut line, 100).await.unwrap();
+        let res = read_line_capped(&mut reader, &mut buf, &mut line, 100).await.unwrap();
         assert!(matches!(res, LineRead::Line));
         assert_eq!(line, "hello\n");
     }
